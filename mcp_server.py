@@ -1,472 +1,767 @@
-"""OpenRouter Provider Validator MCP Server
+"""OpenRouter Provider Validator - MCP Server
 
-Wrap the filesystem client to expose its functionality as MCP tools.
+Exposes OpenRouter Provider Validator operations as tools for LLM interaction.
 """
 
 import logging
-import logging.handlers
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from mcp.server.fastmcp import Context, FastMCP
 from pydantic import BaseModel, Field, field_validator
 
-from client import FileSystemClient, ProviderConfig, TestPrompt, TestResult, ProviderSummary
+from mcp.server.fastmcp import Context, FastMCP
 
-# Set up logging
-logger = logging.getLogger("openrouter_validator")
-logger.setLevel(logging.INFO)
+# Configure logging with rotation
+level = os.getenv("LOG_LEVEL", "INFO")
+log_folder = Path("logs")
+log_folder.mkdir(exist_ok=True)
+log_file = log_folder / f"mcp_{datetime.now().strftime('%Y%m%d')}.log"
 
-# Create logs directory if it doesn't exist
-os.makedirs("logs", exist_ok=True)
-
-# Set up a rotating file handler
-file_handler = logging.handlers.RotatingFileHandler(
-    "logs/validator.log", maxBytes=10*1024*1024, backupCount=5
-)
-file_handler.setFormatter(logging.Formatter(
-    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-))
+logger = logging.getLogger("mcp_server")
+logger.setLevel(getattr(logging, level))
+file_handler = logging.FileHandler(log_file)
+file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
 logger.addHandler(file_handler)
 
-# Console handler for immediate feedback
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(logging.Formatter(
-    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-))
-logger.addHandler(console_handler)
+# Define BaseModels for requests and responses
+class PathRequest(BaseModel):
+    """Request with a file path."""
+    path: str = Field(description="File path to read/write")
 
-# Initialize the FastMCP server
-mcp = FastMCP("OpenRouter Provider Validator")
+class ContentRequest(BaseModel):
+    """Request with content to write."""
+    path: str = Field(description="File path to write to")
+    content: str = Field(description="Content to write")
 
-# Define request models for tools
-class ListProvidersRequest(BaseModel):
-    """Request model for listing providers."""
-    pass
+class AppendRequest(BaseModel):
+    """Request to append content."""
+    path: str = Field(description="File path to append to")
+    content: str = Field(description="Content to append")
+    create_if_missing: bool = Field(default=True, description="Whether to create the file if it doesn't exist")
 
-class GetProviderRequest(BaseModel):
-    """Request model for getting a specific provider."""
-    name: str = Field(description="Provider name to retrieve")
+class ListFolderRequest(BaseModel):
+    """Request to list folder contents."""
+    path: str = Field(description="Folder path to list")
+    include_details: bool = Field(default=False, description="Whether to include file details")
 
-class SaveProviderRequest(BaseModel):
-    """Request model for saving a provider."""
-    provider: ProviderConfig = Field(description="Provider configuration to save")
+class CreateFoldersRequest(BaseModel):
+    """Request to create folders."""
+    paths: List[str] = Field(description="List of folder paths to create")
 
-class DeleteProviderRequest(BaseModel):
-    """Request model for deleting a provider."""
-    name: str = Field(description="Provider name to delete")
+class SearchFilesRequest(BaseModel):
+    """Request to search files for a pattern."""
+    pattern: str = Field(description="Text pattern to search for")
+    path: str = Field(default=".", description="Directory to search in")
+    recursive: bool = Field(default=True, description="Whether to search in subdirectories")
 
-class ListPromptsRequest(BaseModel):
-    """Request model for listing test prompts."""
-    pass
+class CopyEntryRequest(BaseModel):
+    """Request to copy a file or directory."""
+    source_path: str = Field(description="Source path to copy from")
+    destination_path: str = Field(description="Destination path to copy to")
+    overwrite: bool = Field(default=False, description="Whether to overwrite existing files")
 
-class GetPromptRequest(BaseModel):
-    """Request model for getting a specific test prompt."""
-    id: str = Field(description="Prompt ID to retrieve")
+class MoveEntryRequest(BaseModel):
+    """Request to move a file or directory."""
+    source_path: str = Field(description="Source path to move")
+    destination_dir: str = Field(description="Destination directory to move to")
+    overwrite: bool = Field(default=False, description="Whether to overwrite if destination exists")
 
-class SavePromptRequest(BaseModel):
-    """Request model for saving a test prompt."""
-    prompt: TestPrompt = Field(description="Test prompt to save")
+class ProviderDetailsRequest(BaseModel):
+    """Request for information about a specific provider."""
+    provider_id: str = Field(description="ID of the provider to retrieve")
 
-class DeletePromptRequest(BaseModel):
-    """Request model for deleting a test prompt."""
-    id: str = Field(description="Prompt ID to delete")
+class ModelTestResultsRequest(BaseModel):
+    """Request to load test results for a model."""
+    model: Optional[str] = Field(default=None, description="Model to load results for (all models if None)")
 
-class SaveTestResultRequest(BaseModel):
-    """Request model for saving a test result."""
-    result: TestResult = Field(description="Test result to save")
-
-class LoadTestResultsRequest(BaseModel):
-    """Request model for loading test results."""
-    model: Optional[str] = Field(default=None, description="Optional model name to filter by")
-
-class GenerateProviderSummaryRequest(BaseModel):
-    """Request model for generating provider summary."""
-    model: str = Field(description="Model name to generate summary for")
+class ProviderSummaryRequest(BaseModel):
+    """Request to generate a summary for a provider."""
+    model: str = Field(description="Model to generate provider summary for")
 
 class SaveReportRequest(BaseModel):
-    """Request model for saving a report."""
-    report_name: str = Field(description="Name of the report file")
-    content: str = Field(description="Report content")
+    """Request to save a report."""
+    name: str = Field(description="Name for the report file")
+    content: str = Field(description="Report content in markdown format")
 
-class ListModelsRequest(BaseModel):
-    """Request model for listing models."""
-    pass
+# Responses
+class FileContentResponse(BaseModel):
+    """Response containing file content."""
+    content: str = Field(description="File content")
+    success: bool = Field(default=True, description="Whether the operation was successful")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
-class ClearResultsRequest(BaseModel):
-    """Request model for clearing test results."""
-    model: Optional[str] = Field(default=None, description="Optional model name to clear results for")
+class OperationResponse(BaseModel):
+    """Response for a basic operation."""
+    success: bool = Field(description="Whether the operation was successful")
+    error: Optional[str] = Field(default=None, description="Error message if the operation failed")
 
-class GetStatsRequest(BaseModel):
-    """Request model for getting validator statistics."""
-    pass
+class FolderEntryType(str, Enum):
+    """Type of folder entry."""
+    FILE = "file"
+    DIRECTORY = "directory"
 
-# Define response models for tools
-class ListProvidersResponse(BaseModel):
-    """Response model for listing providers."""
-    providers: List[ProviderConfig] = Field(description="List of provider configurations")
+class FolderEntry(BaseModel):
+    """Entry in a folder listing."""
+    name: str = Field(description="Name of the file or folder")
+    type: FolderEntryType = Field(description="Whether it's a file or directory")
+    path: Optional[str] = Field(default=None, description="Full path of entry (for detailed listings)")
+    size: Optional[int] = Field(default=None, description="Size in bytes (for files)")
+    modified: Optional[float] = Field(default=None, description="Last modified timestamp (for files)")
 
-class ProvidersResponse(BaseModel):
-    """Response model for provider operations."""
-    success: bool = Field(description="Whether the operation succeeded")
-    message: str = Field(description="Operation result message")
-    provider: Optional[ProviderConfig] = Field(default=None, description="Provider configuration if available")
+class ListFolderResponse(BaseModel):
+    """Response with folder contents."""
+    entries: List[FolderEntry] = Field(description="List of folder entries")
+    success: bool = Field(default=True, description="Whether the operation was successful")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
-class ListPromptsResponse(BaseModel):
-    """Response model for listing prompts."""
-    prompts: List[TestPrompt] = Field(description="List of test prompts")
+class FileMatch(BaseModel):
+    """Match information for a file search."""
+    line_number: int = Field(description="Line number of the match")
+    context: str = Field(description="Text context around the match")
 
-class PromptResponse(BaseModel):
-    """Response model for prompt operations."""
-    success: bool = Field(description="Whether the operation succeeded")
-    message: str = Field(description="Operation result message")
-    prompt: Optional[TestPrompt] = Field(default=None, description="Test prompt if available")
+class SearchMatch(BaseModel):
+    """Search match in a file."""
+    path: str = Field(description="Path to the file with matches")
+    matches: List[FileMatch] = Field(description="List of matches in the file") 
 
-class TestResultResponse(BaseModel):
-    """Response model for test result operations."""
-    success: bool = Field(description="Whether the operation succeeded")
-    message: str = Field(description="Operation result message")
+class SearchFilesResponse(BaseModel):
+    """Response with search results."""
+    matches: List[SearchMatch] = Field(description="List of matched files with results")
+    success: bool = Field(default=True, description="Whether the search was successful")
+    error: Optional[str] = Field(default=None, description="Error message if search failed")
 
-class LoadTestResultsResponse(BaseModel):
-    """Response model for loading test results."""
-    results: List[TestResult] = Field(description="List of test results")
+class ErrorCategory(BaseModel):
+    """Error category and count."""
+    category: str = Field(description="Error category name")
+    count: int = Field(description="Number of errors in this category")
 
 class ProviderSummaryResponse(BaseModel):
-    """Response model for provider summary."""
-    summaries: List[ProviderSummary] = Field(description="List of provider summaries")
+    """Response with provider summary."""
+    provider: str = Field(description="Provider name")
+    model: str = Field(description="Model identifier")
+    total_attempts: int = Field(description="Total test attempts")
+    successful_attempts: int = Field(description="Successful attempts")
+    failure_rate: float = Field(description="Failure rate as percentage")
+    error_categories: Dict[str, int] = Field(description="Error counts by category")
+    avg_response_time: Optional[float] = Field(default=None, description="Average response time in ms")
+    success: bool = Field(default=True, description="Whether the operation was successful")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
-class ListModelsResponse(BaseModel):
-    """Response model for listing models."""
-    models: List[str] = Field(description="List of model names")
+class ModelListResponse(BaseModel):
+    """Response with list of models."""
+    models: List[str] = Field(description="List of models with test results")
+    success: bool = Field(default=True, description="Whether the operation was successful")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
-class StatisticsResponse(BaseModel):
-    """Response model for validator statistics."""
-    stats: Dict[str, Any] = Field(description="Validator statistics")
+class StatsResponse(BaseModel):
+    """Response with system statistics."""
+    total_providers: int = Field(description="Total number of providers")
+    enabled_providers: int = Field(description="Number of enabled providers")
+    total_prompts: int = Field(description="Total number of prompts")
+    models_tested: int = Field(description="Number of models tested")
+    total_test_results: int = Field(description="Total number of test results")
+    successful_tests: int = Field(description="Number of successful tests")
+    failed_tests: int = Field(description="Number of failed tests")
+    success: bool = Field(default=True, description="Whether the operation was successful")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
-# Define the app context manager to initialize the FileSystemClient
+# Initialize the MCP server
 @asynccontextmanager
-async def app_lifespan(server: FastMCP):
-    """Initialize the FileSystemClient and provide it in the app context."""
+async def lifespan(server: FastMCP):
+    """Initialize and cleanup resources for the MCP server."""
+    # Import and initialize the client
+    from client import FileSystemClient
+    
     client = FileSystemClient()
-    logger.info("FileSystemClient initialized")
+    logger.info("Initialized FileSystemClient for MCP Server")
+    
     try:
         yield {"client": client}
     finally:
-        logger.info("FileSystemClient shutdown")
+        logger.info("Shutting down MCP server")
 
-# Set up the lifespan context
-mcp = FastMCP("OpenRouter Provider Validator", lifespan=app_lifespan)
+mcp = FastMCP(
+    "OpenRouter Provider Validator",
+    description="MCP Server for the OpenRouter Provider Validator",
+    lifespan=lifespan
+)
 
 # Define tool functions
 @mcp.tool()
-def list_providers(request: ListProvidersRequest, ctx: Context) -> ListProvidersResponse:
-    """List all configured OpenRouter providers.
-    
-    Returns a list of all provider configurations stored in the system.
-    """
-    logger.info("Listing providers")
-    client = ctx.request_context.lifespan_context["client"]
-    providers = client.load_providers()
-    return ListProvidersResponse(providers=providers)
-
-@mcp.tool()
-def get_provider(request: GetProviderRequest, ctx: Context) -> ProvidersResponse:
-    """Get a specific provider configuration by name.
+def read_file(request: PathRequest, ctx: Context) -> FileContentResponse:
+    """Read the contents of a file.
     
     Args:
-        name: The provider name to retrieve
+        request: Contains the path of the file to read
+        ctx: Tool context with client access
         
-    Returns information about the requested provider if it exists.
+    Returns:
+        File content or error message
     """
-    logger.info(f"Getting provider: {request.name}")
-    client = ctx.request_context.lifespan_context["client"]
-    providers = client.load_providers()
-    
-    for provider in providers:
-        if provider.name == request.name:
-            return ProvidersResponse(
-                success=True,
-                message=f"Provider {request.name} found",
-                provider=provider
-            )
-    
-    return ProvidersResponse(
-        success=False,
-        message=f"Provider {request.name} not found"
-    )
-
-@mcp.tool()
-def save_provider(request: SaveProviderRequest, ctx: Context) -> ProvidersResponse:
-    """Save or update a provider configuration.
-    
-    If a provider with the same name exists, it will be updated.
-    Otherwise, a new provider will be added.
-    """
-    logger.info(f"Saving provider: {request.provider.name}")
-    client = ctx.request_context.lifespan_context["client"]
-    providers = client.load_providers()
-    
-    # Check if provider already exists
-    found = False
-    for i, provider in enumerate(providers):
-        if provider.name == request.provider.name:
-            providers[i] = request.provider
-            found = True
-            message = f"Updated provider {request.provider.name}"
-            break
-    
-    if not found:
-        providers.append(request.provider)
-        message = f"Added new provider {request.provider.name}"
-    
-    client.save_providers(providers)
-    
-    return ProvidersResponse(
-        success=True,
-        message=message,
-        provider=request.provider
-    )
-
-@mcp.tool()
-def delete_provider(request: DeleteProviderRequest, ctx: Context) -> ProvidersResponse:
-    """Delete a provider configuration by name.
-    
-    Args:
-        name: The provider name to delete
-    """
-    logger.info(f"Deleting provider: {request.name}")
-    client = ctx.request_context.lifespan_context["client"]
-    providers = client.load_providers()
-    
-    original_count = len(providers)
-    providers = [p for p in providers if p.name != request.name]
-    
-    if len(providers) < original_count:
-        client.save_providers(providers)
-        return ProvidersResponse(
-            success=True,
-            message=f"Provider {request.name} deleted"
-        )
-    else:
-        return ProvidersResponse(
-            success=False,
-            message=f"Provider {request.name} not found"
-        )
-
-@mcp.tool()
-def list_prompts(request: ListPromptsRequest, ctx: Context) -> ListPromptsResponse:
-    """List all configured test prompts.
-    
-    Returns a list of all test prompts stored in the system.
-    """
-    logger.info("Listing prompts")
-    client = ctx.request_context.lifespan_context["client"]
-    prompts = client.load_prompts()
-    return ListPromptsResponse(prompts=prompts)
-
-@mcp.tool()
-def get_prompt(request: GetPromptRequest, ctx: Context) -> PromptResponse:
-    """Get a specific test prompt by ID.
-    
-    Args:
-        id: The prompt ID to retrieve
-        
-    Returns information about the requested prompt if it exists.
-    """
-    logger.info(f"Getting prompt: {request.id}")
-    client = ctx.request_context.lifespan_context["client"]
-    prompts = client.load_prompts()
-    
-    for prompt in prompts:
-        if prompt.id == request.id:
-            return PromptResponse(
-                success=True,
-                message=f"Prompt {request.id} found",
-                prompt=prompt
-            )
-    
-    return PromptResponse(
-        success=False,
-        message=f"Prompt {request.id} not found"
-    )
-
-@mcp.tool()
-def save_prompt(request: SavePromptRequest, ctx: Context) -> PromptResponse:
-    """Save or update a test prompt.
-    
-    If a prompt with the same ID exists, it will be updated.
-    Otherwise, a new prompt will be added.
-    """
-    logger.info(f"Saving prompt: {request.prompt.id}")
-    client = ctx.request_context.lifespan_context["client"]
-    prompts = client.load_prompts()
-    
-    # Check if prompt already exists
-    found = False
-    for i, prompt in enumerate(prompts):
-        if prompt.id == request.prompt.id:
-            prompts[i] = request.prompt
-            found = True
-            message = f"Updated prompt {request.prompt.id}"
-            break
-    
-    if not found:
-        prompts.append(request.prompt)
-        message = f"Added new prompt {request.prompt.id}"
-    
-    client.save_prompts(prompts)
-    
-    return PromptResponse(
-        success=True,
-        message=message,
-        prompt=request.prompt
-    )
-
-@mcp.tool()
-def delete_prompt(request: DeletePromptRequest, ctx: Context) -> PromptResponse:
-    """Delete a test prompt by ID.
-    
-    Args:
-        id: The prompt ID to delete
-    """
-    logger.info(f"Deleting prompt: {request.id}")
-    client = ctx.request_context.lifespan_context["client"]
-    prompts = client.load_prompts()
-    
-    original_count = len(prompts)
-    prompts = [p for p in prompts if p.id != request.id]
-    
-    if len(prompts) < original_count:
-        client.save_prompts(prompts)
-        return PromptResponse(
-            success=True,
-            message=f"Prompt {request.id} deleted"
-        )
-    else:
-        return PromptResponse(
-            success=False,
-            message=f"Prompt {request.id} not found"
-        )
-
-@mcp.tool()
-def save_test_result(request: SaveTestResultRequest, ctx: Context) -> TestResultResponse:
-    """Save a test result to the filesystem.
-    
-    Args:
-        result: The test result to save
-    """
-    logger.info(f"Saving test result: {request.result.provider}/{request.result.model}/{request.result.prompt_id}")
     client = ctx.request_context.lifespan_context["client"]
     
     try:
-        client.save_test_result(request.result)
-        return TestResultResponse(
-            success=True,
-            message="Test result saved successfully"
+        logger.info(f"Reading file: {request.path}")
+        content = client.read_file(request.path)
+        return FileContentResponse(content=content, success=True)
+    except Exception as e:
+        logger.error(f"Error reading file {request.path}: {str(e)}")
+        return FileContentResponse(content="", success=False, error=str(e))
+
+@mcp.tool()
+def write_file(request: ContentRequest, ctx: Context) -> OperationResponse:
+    """Write content to a file, creating it if it doesn't exist.
+    
+    Args:
+        request: Contains the path and content for the file
+        ctx: Tool context with client access
+        
+    Returns:
+        Success status or error message
+    """
+    client = ctx.request_context.lifespan_context["client"]
+    
+    try:
+        logger.info(f"Writing to file: {request.path}")
+        client.write_file(request.path, request.content)
+        return OperationResponse(success=True)
+    except Exception as e:
+        logger.error(f"Error writing to file {request.path}: {str(e)}")
+        return OperationResponse(success=False, error=str(e))
+
+@mcp.tool()
+def append_to_file(request: AppendRequest, ctx: Context) -> OperationResponse:
+    """Append content to a file.
+    
+    Args:
+        request: Contains the path, content to append, and creation flag
+        ctx: Tool context with client access
+        
+    Returns:
+        Success status or error message
+    """
+    client = ctx.request_context.lifespan_context["client"]
+    
+    try:
+        logger.info(f"Appending to file: {request.path}")
+        client.append_to_file(request.path, request.content, request.create_if_missing)
+        return OperationResponse(success=True)
+    except Exception as e:
+        logger.error(f"Error appending to file {request.path}: {str(e)}")
+        return OperationResponse(success=False, error=str(e))
+
+@mcp.tool()
+def list_folder_contents(request: ListFolderRequest, ctx: Context) -> ListFolderResponse:
+    """List the contents of a directory.
+    
+    Args:
+        request: Contains the path to list and detail flag
+        ctx: Tool context with client access
+        
+    Returns:
+        Directory contents or error message
+    """
+    client = ctx.request_context.lifespan_context["client"]
+    
+    try:
+        logger.info(f"Listing folder contents: {request.path}")
+        entries_raw = client.list_folder_contents(request.path, request.include_details)
+        
+        # Convert to FolderEntry objects
+        entries = []
+        for entry in entries_raw:
+            folder_entry = FolderEntry(
+                name=entry["name"],
+                type=FolderEntryType.DIRECTORY if entry["type"] == "directory" else FolderEntryType.FILE
+            )
+            
+            # Add additional fields if details were requested
+            if request.include_details:
+                if "path" in entry:
+                    folder_entry.path = entry["path"]
+                if "size" in entry:
+                    folder_entry.size = entry["size"] 
+                if "modified" in entry:
+                    folder_entry.modified = entry["modified"]
+            
+            entries.append(folder_entry)
+        
+        return ListFolderResponse(entries=entries, success=True)
+    except Exception as e:
+        logger.error(f"Error listing folder {request.path}: {str(e)}")
+        return ListFolderResponse(entries=[], success=False, error=str(e))
+
+@mcp.tool()
+def create_folders(request: CreateFoldersRequest, ctx: Context) -> OperationResponse:
+    """Create one or more directories.
+    
+    Args:
+        request: Contains paths of directories to create
+        ctx: Tool context with client access
+        
+    Returns:
+        Success status or error message
+    """
+    client = ctx.request_context.lifespan_context["client"]
+    
+    try:
+        logger.info(f"Creating folders: {', '.join(request.paths)}")
+        client.create_folders(request.paths)
+        return OperationResponse(success=True)
+    except Exception as e:
+        logger.error(f"Error creating folders: {str(e)}")
+        return OperationResponse(success=False, error=str(e))
+
+@mcp.tool()
+def search_files(request: SearchFilesRequest, ctx: Context) -> SearchFilesResponse:
+    """Search files for a text pattern.
+    
+    Args:
+        request: Contains search pattern and options
+        ctx: Tool context with client access
+        
+    Returns:
+        Search results or error message
+    """
+    client = ctx.request_context.lifespan_context["client"]
+    
+    try:
+        logger.info(f"Searching for pattern '{request.pattern}' in {request.path}")
+        matches_raw = client.search_files(request.pattern, request.path, request.recursive)
+        
+        # Convert to structured response
+        matches = []
+        for match in matches_raw:
+            file_matches = []
+            for m in match["matches"]:
+                file_matches.append(FileMatch(
+                    line_number=m["line_number"],
+                    context=m["context"]
+                ))
+                
+            matches.append(SearchMatch(
+                path=match["path"],
+                matches=file_matches
+            ))
+        
+        return SearchFilesResponse(matches=matches, success=True)
+    except Exception as e:
+        logger.error(f"Error searching files: {str(e)}")
+        return SearchFilesResponse(matches=[], success=False, error=str(e))
+
+@mcp.tool()
+def copy_entry(request: CopyEntryRequest, ctx: Context) -> OperationResponse:
+    """Copy a file or directory.
+    
+    Args:
+        request: Contains source and destination paths and overwrite flag
+        ctx: Tool context with client access
+        
+    Returns:
+        Success status or error message
+    """
+    client = ctx.request_context.lifespan_context["client"]
+    
+    try:
+        logger.info(f"Copying {request.source_path} to {request.destination_path}")
+        client.copy_entry(request.source_path, request.destination_path, request.overwrite)
+        return OperationResponse(success=True)
+    except Exception as e:
+        logger.error(f"Error copying entry: {str(e)}")
+        return OperationResponse(success=False, error=str(e))
+
+@mcp.tool()
+def move_entry(request: MoveEntryRequest, ctx: Context) -> OperationResponse:
+    """Move a file or directory.
+    
+    Args:
+        request: Contains source path, destination directory, and overwrite flag
+        ctx: Tool context with client access
+        
+    Returns:
+        Success status or error message
+    """
+    client = ctx.request_context.lifespan_context["client"]
+    
+    try:
+        logger.info(f"Moving {request.source_path} to {request.destination_dir}")
+        client.move_entry(request.source_path, request.destination_dir, request.overwrite)
+        return OperationResponse(success=True)
+    except Exception as e:
+        logger.error(f"Error moving entry: {str(e)}")
+        return OperationResponse(success=False, error=str(e))
+
+@mcp.tool()
+def load_test_results(request: ModelTestResultsRequest, ctx: Context) -> Dict[str, Any]:
+    """Load test results for a model.
+    
+    Args:
+        request: Contains the model to load results for (optional)
+        ctx: Tool context with client access
+        
+    Returns:
+        Dictionary with test results or error
+    """
+    client = ctx.request_context.lifespan_context["client"]
+    
+    try:
+        logger.info(f"Loading test results for model: {request.model or 'all'}")
+        results = client.load_test_results(request.model)
+        
+        # Convert to serializable format
+        serialized_results = []
+        for result in results:
+            serialized_results.append(json.loads(result.json()))
+        
+        return {
+            "results": serialized_results,
+            "count": len(serialized_results),
+            "success": True
+        }
+    except Exception as e:
+        logger.error(f"Error loading test results: {str(e)}")
+        return {
+            "results": [],
+            "count": 0,
+            "success": False,
+            "error": str(e)
+        }
+
+@mcp.tool()
+def get_provider_summary(request: ProviderSummaryRequest, ctx: Context) -> List[ProviderSummaryResponse]:
+    """Generate summary statistics for providers of a model.
+    
+    Args:
+        request: Contains the model to generate summary for
+        ctx: Tool context with client access
+        
+    Returns:
+        List of provider summaries or error
+    """
+    client = ctx.request_context.lifespan_context["client"]
+    
+    try:
+        logger.info(f"Generating provider summary for model: {request.model}")
+        summaries = client.generate_provider_summary(request.model)
+        
+        # Convert to response objects
+        responses = []
+        for summary in summaries:
+            responses.append(ProviderSummaryResponse(
+                provider=summary.provider,
+                model=summary.model,
+                total_attempts=summary.total_attempts,
+                successful_attempts=summary.successful_attempts,
+                failure_rate=summary.failure_rate,
+                error_categories=summary.error_categories,
+                avg_response_time=summary.avg_response_time,
+                success=True
+            ))
+        
+        return responses
+    except Exception as e:
+        logger.error(f"Error generating provider summary: {str(e)}")
+        return [ProviderSummaryResponse(
+            provider="error",
+            model=request.model,
+            total_attempts=0,
+            successful_attempts=0,
+            failure_rate=0.0,
+            error_categories={},
+            success=False,
+            error=str(e)
+        )]
+
+@mcp.tool()
+def list_models(ctx: Context) -> ModelListResponse:
+    """List all models that have test results.
+    
+    Args:
+        ctx: Tool context with client access
+        
+    Returns:
+        List of model names or error
+    """
+    client = ctx.request_context.lifespan_context["client"]
+    
+    try:
+        logger.info("Listing models with test results")
+        models = client.list_models()
+        return ModelListResponse(models=models, success=True)
+    except Exception as e:
+        logger.error(f"Error listing models: {str(e)}")
+        return ModelListResponse(models=[], success=False, error=str(e))
+
+@mcp.tool()
+def get_stats(ctx: Context) -> StatsResponse:
+    """Get overall statistics about the test data.
+    
+    Args:
+        ctx: Tool context with client access
+        
+    Returns:
+        Statistics or error message
+    """
+    client = ctx.request_context.lifespan_context["client"]
+    
+    try:
+        logger.info("Getting system statistics")
+        stats = client.get_stats()
+        
+        return StatsResponse(
+            total_providers=stats.get("total_providers", 0),
+            enabled_providers=stats.get("enabled_providers", 0),
+            total_prompts=stats.get("total_prompts", 0),
+            models_tested=stats.get("models_tested", 0),
+            total_test_results=stats.get("total_test_results", 0),
+            successful_tests=stats.get("successful_tests", 0),
+            failed_tests=stats.get("failed_tests", 0),
+            success=True
         )
     except Exception as e:
-        logger.error(f"Error saving test result: {str(e)}")
-        return TestResultResponse(
+        logger.error(f"Error getting stats: {str(e)}")
+        return StatsResponse(
+            total_providers=0,
+            enabled_providers=0,
+            total_prompts=0,
+            models_tested=0,
+            total_test_results=0,
+            successful_tests=0,
+            failed_tests=0,
             success=False,
-            message=f"Error saving test result: {str(e)}"
+            error=str(e)
         )
 
 @mcp.tool()
-def load_test_results(request: LoadTestResultsRequest, ctx: Context) -> LoadTestResultsResponse:
-    """Load test results, optionally filtered by model.
-    
-    Args:
-        model: Optional model name to filter results
-    """
-    logger.info(f"Loading test results" + (f" for model {request.model}" if request.model else ""))
-    client = ctx.request_context.lifespan_context["client"]
-    results = client.load_test_results(request.model)
-    return LoadTestResultsResponse(results=results)
-
-@mcp.tool()
-def generate_provider_summary(request: GenerateProviderSummaryRequest, ctx: Context) -> ProviderSummaryResponse:
-    """Generate summary statistics for all providers of a model.
-    
-    Args:
-        model: Model name to generate summary for
-    """
-    logger.info(f"Generating provider summary for model {request.model}")
-    client = ctx.request_context.lifespan_context["client"]
-    summaries = client.generate_provider_summary(request.model)
-    return ProviderSummaryResponse(summaries=summaries)
-
-@mcp.tool()
-def save_report(request: SaveReportRequest, ctx: Context) -> TestResultResponse:
+def save_report(request: SaveReportRequest, ctx: Context) -> OperationResponse:
     """Save a report to the reports directory.
     
     Args:
-        report_name: Name of the report file
-        content: Report content
+        request: Contains report name and content
+        ctx: Tool context with client access
+        
+    Returns:
+        Success status or error message
     """
-    logger.info(f"Saving report: {request.report_name}")
     client = ctx.request_context.lifespan_context["client"]
     
     try:
-        client.save_report(request.report_name, request.content)
-        return TestResultResponse(
-            success=True,
-            message=f"Report {request.report_name} saved successfully"
-        )
+        logger.info(f"Saving report: {request.name}")
+        client.save_report(request.name, request.content)
+        return OperationResponse(success=True)
     except Exception as e:
         logger.error(f"Error saving report: {str(e)}")
-        return TestResultResponse(
-            success=False,
-            message=f"Error saving report: {str(e)}"
-        )
+        return OperationResponse(success=False, error=str(e))
 
-@mcp.tool()
-def list_models(request: ListModelsRequest, ctx: Context) -> ListModelsResponse:
-    """List all models that have test results.
+# Create a class to expose server
+class MCPServer:
+    """OpenRouter Provider Validator MCP Server."""
     
-    Returns a list of model names that have test results.
-    """
-    logger.info("Listing models")
-    client = ctx.request_context.lifespan_context["client"]
-    models = client.list_models()
-    return ListModelsResponse(models=models)
-
-@mcp.tool()
-def clear_results(request: ClearResultsRequest, ctx: Context) -> TestResultResponse:
-    """Clear test results, optionally for a specific model.
-    
-    Args:
-        model: Optional model name to clear results for
-    """
-    logger.info(f"Clearing test results" + (f" for model {request.model}" if request.model else ""))
-    client = ctx.request_context.lifespan_context["client"]
-    
-    try:
-        client.clear_results(request.model)
-        message = f"Test results cleared" + (f" for model {request.model}" if request.model else "")
-        return TestResultResponse(
-            success=True,
-            message=message
-        )
-    except Exception as e:
-        logger.error(f"Error clearing results: {str(e)}")
-        return TestResultResponse(
-            success=False,
-            message=f"Error clearing results: {str(e)}"
-        )
-
-@mcp.tool()
-def get_stats(request: GetStatsRequest, ctx: Context) -> StatisticsResponse:
-    """Get overall statistics about the validator data.
-    
-    Returns statistics about providers, prompts, models, and test results.
-    """
-    logger.info("Getting validator statistics")
-    client = ctx.request_context.lifespan_context["client"]
-    stats = client.get_stats()
-    return StatisticsResponse(stats=stats)
+    def __init__(self, client):
+        """Initialize the server with a filesystem client.
+        
+        Args:
+            client: FileSystemClient instance
+        """
+        self.client = client
+        self._mcp = mcp
+        
+    def get_tools(self):
+        """Get the tool definitions.
+        
+        Returns:
+            List of tool definitions for OpenRouter API
+        """
+        # This would normally come from introspection, but manually define for now
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read the contents of a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "File path to read"
+                            }
+                        },
+                        "required": ["path"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "description": "Write content to a file, creating it if it doesn't exist",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "File path to write to"
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Content to write to the file"
+                            }
+                        },
+                        "required": ["path", "content"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "append_to_file",
+                    "description": "Append content to a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string", 
+                                "description": "File path to append to"
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Content to append"
+                            },
+                            "create_if_missing": {
+                                "type": "boolean",
+                                "description": "Whether to create the file if it doesn't exist",
+                                "default": True
+                            }
+                        },
+                        "required": ["path", "content"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_folder_contents",
+                    "description": "List the contents of a directory",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Folder path to list"
+                            },
+                            "include_details": {
+                                "type": "boolean",
+                                "description": "Whether to include file details",
+                                "default": False
+                            }
+                        },
+                        "required": ["path"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_folders",
+                    "description": "Create one or more directories",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "paths": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "List of folder paths to create"
+                            }
+                        },
+                        "required": ["paths"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_files",
+                    "description": "Search files for a text pattern",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "pattern": {
+                                "type": "string",
+                                "description": "Text pattern to search for"
+                            },
+                            "path": {
+                                "type": "string",
+                                "description": "Directory to search in",
+                                "default": "."
+                            },
+                            "recursive": {
+                                "type": "boolean",
+                                "description": "Whether to search in subdirectories",
+                                "default": True
+                            }
+                        },
+                        "required": ["pattern"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "copy_entry",
+                    "description": "Copy a file or directory",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "source_path": {
+                                "type": "string",
+                                "description": "Source path to copy from"
+                            },
+                            "destination_path": {
+                                "type": "string",
+                                "description": "Destination path to copy to"
+                            },
+                            "overwrite": {
+                                "type": "boolean",
+                                "description": "Whether to overwrite existing files",
+                                "default": False
+                            }
+                        },
+                        "required": ["source_path", "destination_path"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "move_entry",
+                    "description": "Move a file or directory",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "source_path": {
+                                "type": "string",
+                                "description": "Source path to move"
+                            },
+                            "destination_dir": {
+                                "type": "string",
+                                "description": "Destination directory to move to"
+                            },
+                            "overwrite": {
+                                "type": "boolean",
+                                "description": "Whether to overwrite if destination exists",
+                                "default": False
+                            }
+                        },
+                        "required": ["source_path", "destination_dir"]
+                    }
+                }
+            }
+        ]
 
 def main():
     mcp.run()

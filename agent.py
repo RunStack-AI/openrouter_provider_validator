@@ -1,257 +1,280 @@
-# PydanticAI Agent with MCP for OpenRouter Provider Validator
+#!/usr/bin/env python
+"""OpenRouter Provider Validator - Test Agent
 
-from pydantic_ai import Agent, RunContext
-from pydantic_ai.mcp import MCPServerStdio
-from pydantic_ai.models.openai import OpenAIModel
-from pydantic_ai.messages import ModelMessage, SystemPromptPart, UserPromptPart, TextPart, ToolCallPart, ToolReturnPart
-from pydantic_ai.providers.openai import OpenAIProvider
-from pydantic_ai.agent import AgentRunResult
+CLI tool for running tests against the toy filesystem.
+"""
 
-from dotenv import load_dotenv
-import os
 import argparse
-from typing import Optional, List, Dict, Any
-from datetime import datetime, timezone
 import asyncio
-import traceback
+import json
+import logging
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Any
 
+import httpx
+from dotenv import load_dotenv
+
+from client import FileSystemClient
+from mcp_server import MCPServer
+
+# Load environment variables
 load_dotenv()
 
-# Configure logging if logfire is available
-try:
-    import logfire
-    logfire_token = os.getenv("LOGFIRE_API_KEY")
-    if logfire_token:
-        logfire.configure(token=logfire_token)
-        logfire.instrument_openai()
-        print("Logfire configured for logging")
-    else:
-        print("Logfire API key not found, skipping configuration")
-except ImportError:
-    print("Logfire not installed, skipping logging configuration")
-
-# Parse command line arguments
-def parse_args():
-    parser = argparse.ArgumentParser(description="OpenRouter Provider Validator Agent")
-    parser.add_argument(
-        "--model", 
-        type=str, 
-        default="anthropic/claude-3.7-sonnet",
-        help="Model identifier to use with OpenRouter (default: anthropic/claude-3.7-sonnet)"
-    )
-    parser.add_argument(
-        "--provider", 
-        type=str, 
-        default=None,
-        help="Provider name to test (default: None, will not route to specific provider)"
-    )
-    return parser.parse_args()
-
-# Get command line arguments
-args = parse_args()
-
-# Set up OpenRouter based model with optional provider routing
-API_KEY = os.getenv('OPENROUTER_API_KEY')
-if API_KEY is None:
-    raise ValueError("OPENROUTER_API_KEY environment variable is required")
-
-# Configure model settings with provider routing if specified
-model_settings = {}
-if args.provider:
-    model_settings["extra_body"] = {
-        "provider": args.provider
-    }
-    print(f"Routing to provider: {args.provider}")
-
-model = OpenAIModel(
-    args.model,  # Use the model from command line arguments
-    provider=OpenAIProvider(
-        base_url='https://openrouter.ai/api/v1', 
-        api_key=API_KEY
-    ),
-    settings=model_settings
+# Configure logging
+logging_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+log_dir = Path("logs")
+log_dir.mkdir(exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format=logging_format,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(log_dir / f"agent_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+    ]
 )
 
-# Set up MCP Server for the Agent
-mcp_servers = [
-    MCPServerStdio('python', ['./mcp_server.py']),
-]
+logger = logging.getLogger("agent")
 
-# Function to filter message history
-def filtered_message_history(
-    result: Optional[AgentRunResult], 
-    limit: Optional[int] = None, 
-    include_tool_messages: bool = True
-) -> Optional[List[Dict[str, Any]]]:
-    """
-    Filter and limit the message history from an AgentRunResult.
+class OpenRouterClient:
+    """Client for interacting with the OpenRouter API."""
     
-    Args:
-        result: The AgentRunResult object with message history
-        limit: Optional int, if provided returns only system message + last N messages
-        include_tool_messages: Whether to include tool messages in the history
+    def __init__(self, api_key: Optional[str] = None):
+        """Initialize the OpenRouter client.
         
-    Returns:
-        Filtered list of messages in the format expected by the agent
-    """
-    if result is None:
-        return None
+        Args:
+            api_key: OpenRouter API key (defaults to OPENROUTER_API_KEY environment variable)
+        """
+        self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
+        if not self.api_key:
+            raise ValueError("OPENROUTER_API_KEY not set")
         
-    # Get all messages
-    messages: list[ModelMessage] = result.all_messages()
+        self.base_url = "https://openrouter.ai/api/v1"
     
-    # Extract system message (always the first one with role="system")
-    system_message = next((msg for msg in messages if type(msg.parts[0]) == SystemPromptPart), None)
-    
-    # Filter non-system messages
-    non_system_messages = [msg for msg in messages if type(msg.parts[0]) != SystemPromptPart]
-    
-    # Apply tool message filtering if requested
-    if not include_tool_messages:
-        non_system_messages = [msg for msg in non_system_messages if not any(isinstance(part, ToolCallPart) or isinstance(part, ToolReturnPart) for part in msg.parts)]
-    
-    # Find the most recent UserPromptPart before applying limit
-    latest_user_prompt_part = None
-    latest_user_prompt_index = -1
-    for i, msg in enumerate(non_system_messages):
-        for part in msg.parts:
-            if isinstance(part, UserPromptPart):
-                latest_user_prompt_part = part
-                latest_user_prompt_index = i
-    
-    # Apply limit if specified, but ensure paired tool calls and returns stay together
-    if limit is not None and limit > 0:
-        # Identify tool call IDs and their corresponding return parts
-        tool_call_ids = {}
-        tool_return_ids = set()
+    async def chat_completion(
+        self, 
+        messages: List[Dict[str, Any]], 
+        model: str,
+        provider: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        temperature: float = 0.2,
+        max_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Create a chat completion via OpenRouter.
         
-        for i, msg in enumerate(non_system_messages):
-            for part in msg.parts:
-                if isinstance(part, ToolCallPart):
-                    tool_call_ids[part.tool_call_id] = i
-                elif isinstance(part, ToolReturnPart):
-                    tool_return_ids.add(part.tool_call_id)
-        
-        # Take the last 'limit' messages but ensure we include paired messages
-        if len(non_system_messages) > limit:
-            included_indices = set(range(len(non_system_messages) - limit, len(non_system_messages)))
+        Args:
+            messages: List of chat messages
+            model: Model identifier (e.g., anthropic/claude-3-opus)
+            provider: Optional provider routing override
+            tools: Optional tool definitions
+            temperature: Sampling temperature
+            max_tokens: Max tokens to generate
             
-            # Include any missing tool call messages for tool returns that are included
-            for i, msg in enumerate(non_system_messages):
-                if i in included_indices:
-                    for part in msg.parts:
-                        if isinstance(part, ToolReturnPart) and part.tool_call_id in tool_call_ids:
-                            included_indices.add(tool_call_ids[part.tool_call_id])
+        Returns:
+            OpenRouter API response
+        """
+        url = f"{self.base_url}/chat/completions"
+        
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "HTTP-Referer": "https://github.com/example/openrouter-validator",
+            "X-Title": "OpenRouter Provider Validator",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "tool_choice": "auto"
+        }
+        
+        if provider:
+            data["route"] = provider
             
-            # Check if the latest UserPromptPart would be excluded by the limit
-            if (latest_user_prompt_index >= 0 and 
-                latest_user_prompt_index not in included_indices and 
-                latest_user_prompt_part is not None and 
-                system_message is not None):
-                # Find if system_message already has a UserPromptPart
-                user_prompt_index = next((i for i, part in enumerate(system_message.parts) 
-                                       if isinstance(part, UserPromptPart)), None)
-                
-                if user_prompt_index is not None:
-                    # Replace existing UserPromptPart
-                    system_message.parts[user_prompt_index] = latest_user_prompt_part
-                else:
-                    # Add new UserPromptPart to system message
-                    system_message.parts.append(latest_user_prompt_part)
+        if tools:
+            data["tools"] = tools
             
-            # Create a new list with only the included messages
-            non_system_messages = [msg for i, msg in enumerate(non_system_messages) if i in included_indices]
+        if max_tokens:
+            data["max_tokens"] = max_tokens
+        
+        async with httpx.AsyncClient(timeout=120) as client:
+            logger.info(f"Sending request to OpenRouter with model {model}")
+            response = await client.post(url, json=data, headers=headers)
+            response.raise_for_status()
+            response_data = response.json()
+            return response_data
+
+class ProviderTester:
+    """Test runner for OpenRouter providers using the toy filesystem."""
     
-    # Combine system message with other messages
-    result_messages = []
-    if system_message:
-        result_messages.append(system_message)
-    result_messages.extend(non_system_messages)
+    def __init__(self, model: str, provider: Optional[str] = None):
+        """Initialize the tester.
+        
+        Args:
+            model: Model identifier to test
+            provider: Optional provider to route to
+        """
+        self.model = model
+        self.provider = provider
+        self.openrouter_client = OpenRouterClient()
+        self.filesystem_client = FileSystemClient()
+        self.mcp_server = MCPServer(self.filesystem_client)
     
-    return result_messages
-
-# Set up Agent with Server
-agent_name = "openrouter_validator"
-def load_agent_prompt(agent: str):
-    """Loads given agent replacing `time_now` var with current time"""
-    print(f"Loading {agent} agent prompt")
-    time_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    def _setup_test_files(self):
+        """Setup toy filesystem for testing."""
+        # Create test directories
+        self.filesystem_client.create_folders(["data/test_files", "data/test_files/nested"])
+        
+        # Create sample files for testing
+        sample_files = [
+            ("data/test_files/sample1.txt", "This is sample file 1\nIt has multiple lines\nFor testing file reading operations."),
+            ("data/test_files/sample2.txt", "Sample file 2 contains different content\nUseful for testing searching functionality."),
+            ("data/test_files/nested/sample3.txt", "This is a nested file\nLocated in a subdirectory\nFor testing nested path operations.")
+        ]
+        
+        for filepath, content in sample_files:
+            self.filesystem_client.write_file(filepath, content)
+        
+        logger.info("Toy filesystem setup complete")
     
-    # Check if the agents folder exists
-    agents_dir = os.path.join(os.getcwd(), "agents")
-    if not os.path.exists(agents_dir):
-        os.makedirs(agents_dir)
+    async def run_test(self, prompt_id: str) -> Dict[str, Any]:
+        """Run a single test with the specified prompt.
+        
+        Args:
+            prompt_id: ID of the prompt to test with
+            
+        Returns:
+            Test result dictionary
+        """
+        # Ensure test files exist
+        self._setup_test_files()
+        
+        # Load prompt
+        prompts = self.filesystem_client.load_prompts()
+        prompt = next((p for p in prompts if p.get("id") == prompt_id), None)
+        
+        if not prompt:
+            logger.error(f"Prompt {prompt_id} not found")
+            return {"success": False, "error": f"Prompt {prompt_id} not found"}
+        
+        # Load system prompt from agent profile
+        with open("agents/openrouter_validator.md", "r") as f:
+            system_prompt = f.read()
+        
+        # Setup messages
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt["content"]}
+        ]
+        
+        # Get tool definitions
+        tools = self.mcp_server.get_tools()
+        
+        start_time = datetime.now()
+        try:
+            # Send request to OpenRouter
+            response = await self.openrouter_client.chat_completion(
+                messages=messages,
+                model=self.model,
+                provider=self.provider,
+                tools=tools,
+                temperature=0.2
+            )
+            
+            # Check if tools were used
+            tool_calls = []
+            if "choices" in response and len(response["choices"]) > 0:
+                choice = response["choices"][0]
+                if "message" in choice and "tool_calls" in choice["message"]:
+                    tool_calls = choice["message"]["tool_calls"]
+            
+            success = len(tool_calls) > 0
+            
+            # Create test result
+            result = {
+                "provider": self.provider or self.model.split("/")[0],
+                "model": self.model,
+                "prompt_id": prompt_id,
+                "success": success,
+                "response_data": response,
+                "timestamp": datetime.now().isoformat(),
+                "metrics": {
+                    "latency_ms": int((datetime.now() - start_time).total_seconds() * 1000),
+                    "tool_calls": len(tool_calls)
+                }
+            }
+            
+            # Add token usage if available 
+            if "usage" in response:
+                result["token_usage"] = response["usage"]
+            
+            if not success:
+                result["error_message"] = "No tool calls in response"
+                result["error_category"] = "tool_usage_error"
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error running test: {str(e)}")
+            return {
+                "provider": self.provider or self.model.split("/")[0],
+                "model": self.model,
+                "prompt_id": prompt_id,
+                "success": False,
+                "timestamp": datetime.now().isoformat(),
+                "error_message": str(e),
+                "error_category": "api_error"
+            }
     
-    # Check if the agent prompt file exists
-    agent_prompt_path = os.path.join(agents_dir, f"{agent}.md")
-    if not os.path.exists(agent_prompt_path):
-        # Create a basic prompt if it doesn't exist
-        basic_prompt = f"""# OpenRouter Provider Validator Agent
-
-## Identity
-You are the OpenRouter Provider Validator Agent, designed to test and evaluate various OpenRouter.ai providers using predefined prompts with a focus on tool use capabilities.
-
-## Capabilities
-- Configure and manage providers for testing
-- Manage test prompts focused on tool use
-- Execute tests and collect results
-- Generate reports and statistics
-- Analyze provider performance
-
-## Current Time
-{{time_now}}
-"""
-        with open(agent_prompt_path, "w") as f:
-            f.write(basic_prompt)
-        print(f"Created basic agent prompt at {agent_prompt_path}")
-    
-    with open(agent_prompt_path, "r") as f:
-        agent_prompt = f.read()
-    
-    agent_prompt = agent_prompt.replace('{time_now}', time_now)
-    return agent_prompt
-
-# Load up the agent system prompt
-agent_prompt = load_agent_prompt(agent_name)
-
-# Display the selected model
-print(f"Using model: {args.model}")
-
-# Initialize the agent
-agent = Agent(model, mcp_servers=mcp_servers, system_prompt=agent_prompt)
+    async def run_all_tests(self) -> List[Dict[str, Any]]:
+        """Run all prompts as tests.
+        
+        Returns:
+            List of test results
+        """
+        prompts = self.filesystem_client.load_prompts()
+        results = []
+        
+        for prompt in prompts:
+            logger.info(f"Running test with prompt {prompt['id']}")
+            result = await self.run_test(prompt["id"])
+            results.append(result)
+        
+        return results
 
 async def main():
-    """CLI testing in a conversation with the agent"""
-    async with agent.run_mcp_servers(): 
-        result: AgentRunResult = None
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="OpenRouter Provider Validator Test Agent")
+    parser.add_argument("--model", default="anthropic/claude-3.7-sonnet", help="Model to test")
+    parser.add_argument("--provider", help="Provider to route to (optional)")
+    parser.add_argument("--prompt", help="Specific prompt ID to test (optional)")
+    parser.add_argument("--all", action="store_true", help="Run all tests")
+    args = parser.parse_args()
+    
+    # Create tester
+    tester = ProviderTester(model=args.model, provider=args.provider)
+    
+    # Run tests
+    if args.prompt:
+        logger.info(f"Running single test with prompt {args.prompt}")
+        result = await tester.run_test(args.prompt)
+        print(json.dumps(result, indent=2))
+    elif args.all:
+        logger.info("Running all tests")
+        results = await tester.run_all_tests()
+        
+        # Save results
+        tester.filesystem_client.save_test_results(args.model, results)
+        
+        # Print summary
+        success_count = sum(1 for r in results if r["success"])
+        print(f"Tests completed: {len(results)} total, {success_count} successful, {len(results) - success_count} failed")
+    else:
+        print("Please specify --prompt ID to run a single test or --all to run all tests")
+        sys.exit(1)
 
-        # Chat Loop
-        while True:
-            if result:
-                print(f"\n{result.output}")
-            user_input = input("\n> ")
-            err = None
-            for i in range(0, 2):
-                try:
-                    # Use the filtered message history
-                    result = await agent.run(
-                        user_input, 
-                        message_history=filtered_message_history(
-                            result,
-                            limit=24,                  # Last 24 non-system messages
-                            include_tool_messages=True # Include tool messages
-                        )
-                    )
-                    break
-                except Exception as e:
-                    err = e
-                    traceback.print_exc()
-                    await asyncio.sleep(2)
-            if result is None:
-                print(f"\nError {err}. Try again...\n")
-                continue
-            elif len(result.output) == 0:
-                continue
-                
 if __name__ == "__main__":
     asyncio.run(main())
