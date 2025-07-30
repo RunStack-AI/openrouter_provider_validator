@@ -122,6 +122,7 @@ class ProviderTester:
         self.openrouter_client = OpenRouterClient()
         self.filesystem_client = FileSystemClient()
         self.mcp_server = MCPServer(self.filesystem_client)
+        self.conversation_history = []
     
     def _setup_test_files(self):
         """Setup toy filesystem for testing."""
@@ -152,6 +153,9 @@ class ProviderTester:
         # Ensure test files exist
         self._setup_test_files()
         
+        # Clear conversation history for new test
+        self.conversation_history = []
+        
         # Load prompt
         prompts = self.filesystem_client.load_prompts()
         prompt = next((p for p in prompts if p.get("id") == prompt_id), None)
@@ -161,73 +165,111 @@ class ProviderTester:
             return {"success": False, "error": f"Prompt {prompt_id} not found"}
         
         # Load system prompt from agent profile
-        with open("agents/openrouter_validator.md", "r") as f:
-            system_prompt = f.read()
+        system_prompt = "You are a helpful assistant that interacts with the filesystem. Use the available tools to complete tasks."
+        if os.path.exists("agents/openrouter_validator.md"):
+            with open("agents/openrouter_validator.md", "r") as f:
+                system_prompt = f.read()
         
-        # Setup messages
+        # Setup initial messages
         messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt["content"]}
+            {"role": "system", "content": system_prompt}
         ]
         
         # Get tool definitions
         tools = self.mcp_server.get_tools()
         
+        # Track metrics
         start_time = datetime.now()
-        try:
-            # Send request to OpenRouter
-            response = await self.openrouter_client.chat_completion(
-                messages=messages,
-                model=self.model,
-                provider=self.provider,
-                tools=tools,
-                temperature=0.2
-            )
+        total_tool_calls = 0
+        successful_steps = 0
+        sequence = prompt.get("sequence", [prompt.get("content", "")])  # Handle both single prompts and sequences
+        step_results = []
+        
+        # Execute prompt sequence
+        for i, step_prompt in enumerate(sequence):
+            logger.info(f"Running step {i+1}/{len(sequence)} for prompt {prompt_id}")
             
-            # Check if tools were used
-            tool_calls = []
-            if "choices" in response and len(response["choices"]) > 0:
-                choice = response["choices"][0]
-                if "message" in choice and "tool_calls" in choice["message"]:
-                    tool_calls = choice["message"]["tool_calls"]
+            # Add this step's prompt to messages
+            messages.append({"role": "user", "content": step_prompt})
             
-            success = len(tool_calls) > 0
-            
-            # Create test result
-            result = {
-                "provider": self.provider or self.model.split("/")[0],
-                "model": self.model,
-                "prompt_id": prompt_id,
-                "success": success,
-                "response_data": response,
-                "timestamp": datetime.now().isoformat(),
-                "metrics": {
-                    "latency_ms": int((datetime.now() - start_time).total_seconds() * 1000),
-                    "tool_calls": len(tool_calls)
-                }
+            try:
+                # Send request to OpenRouter
+                response = await self.openrouter_client.chat_completion(
+                    messages=messages,
+                    model=self.model,
+                    provider=self.provider,
+                    tools=tools,
+                    temperature=0.2
+                )
+                
+                # Check if tools were used
+                tool_calls = []
+                if "choices" in response and len(response["choices"]) > 0:
+                    choice = response["choices"][0]
+                    if "message" in choice:
+                        # Add assistant response to conversation history
+                        assistant_message = {"role": "assistant"}
+                        assistant_message.update(choice["message"])
+                        messages.append(assistant_message)
+                        
+                        # Extract tool calls
+                        if "tool_calls" in choice["message"]:
+                            tool_calls = choice["message"]["tool_calls"]
+                            total_tool_calls += len(tool_calls)
+                
+                # Determine if step was successful
+                step_success = len(tool_calls) > 0
+                if step_success:
+                    successful_steps += 1
+                
+                # Record step result
+                step_results.append({
+                    "step": i + 1,
+                    "prompt": step_prompt,
+                    "success": step_success,
+                    "tool_calls": len(tool_calls),
+                    "response": response
+                })
+                
+            except Exception as e:
+                logger.error(f"Error in step {i+1}: {str(e)}")
+                step_results.append({
+                    "step": i + 1,
+                    "prompt": step_prompt,
+                    "success": False,
+                    "error": str(e)
+                })
+        
+        # Overall success is based on percentage of successful steps
+        overall_success = successful_steps / len(sequence) >= 0.6  # At least 60% of steps should succeed
+        
+        # Create detailed test result
+        result = {
+            "provider": self.provider or self.model.split("/")[0],
+            "model": self.model,
+            "prompt_id": prompt_id,
+            "success": overall_success,
+            "total_steps": len(sequence),
+            "successful_steps": successful_steps,
+            "step_results": step_results,
+            "timestamp": datetime.now().isoformat(),
+            "metrics": {
+                "latency_ms": int((datetime.now() - start_time).total_seconds() * 1000),
+                "total_tool_calls": total_tool_calls,
+                "avg_tool_calls_per_step": total_tool_calls / len(sequence) if len(sequence) > 0 else 0
             }
-            
-            # Add token usage if available 
-            if "usage" in response:
-                result["token_usage"] = response["usage"]
-            
-            if not success:
-                result["error_message"] = "No tool calls in response"
-                result["error_category"] = "tool_usage_error"
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error running test: {str(e)}")
-            return {
-                "provider": self.provider or self.model.split("/")[0],
-                "model": self.model,
-                "prompt_id": prompt_id,
-                "success": False,
-                "timestamp": datetime.now().isoformat(),
-                "error_message": str(e),
-                "error_category": "api_error"
-            }
+        }
+        
+        # Add token usage if available from the last response
+        last_response = step_results[-1].get("response", {}) if step_results else {}
+        if "usage" in last_response:
+            result["token_usage"] = last_response["usage"]
+        
+        if not overall_success:
+            result["error_message"] = f"Only {successful_steps}/{len(sequence)} steps completed successfully"  
+            result["error_category"] = "incomplete_sequence"
+        
+        return result
     
     async def run_all_tests(self) -> List[Dict[str, Any]]:
         """Run all prompts as tests.
@@ -252,6 +294,7 @@ async def main():
     parser.add_argument("--provider", help="Provider to route to (optional)")
     parser.add_argument("--prompt", help="Specific prompt ID to test (optional)")
     parser.add_argument("--all", action="store_true", help="Run all tests")
+    parser.add_argument("--output", help="Output file for results (optional)")
     args = parser.parse_args()
     
     # Create tester
@@ -261,7 +304,18 @@ async def main():
     if args.prompt:
         logger.info(f"Running single test with prompt {args.prompt}")
         result = await tester.run_test(args.prompt)
-        print(json.dumps(result, indent=2))
+        
+        # Save result to specified output file or use default name
+        output_file = args.output or f"result_{args.prompt}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(output_file, "w") as f:
+            json.dump(result, f, indent=2)
+        
+        # Print summary
+        print(f"Test completed: {'Success' if result['success'] else 'Failure'}")
+        print(f"Steps: {result['successful_steps']}/{result['total_steps']} successful")
+        print(f"Tool calls: {result['metrics']['total_tool_calls']}")
+        print(f"Full results saved to {output_file}")
+        
     elif args.all:
         logger.info("Running all tests")
         results = await tester.run_all_tests()
@@ -269,9 +323,19 @@ async def main():
         # Save results
         tester.filesystem_client.save_test_results(args.model, results)
         
+        # Save to specified output file if provided
+        if args.output:
+            with open(args.output, "w") as f:
+                json.dump(results, f, indent=2)
+        
         # Print summary
         success_count = sum(1 for r in results if r["success"])
+        step_success_rate = sum(r["successful_steps"] for r in results) / sum(r["total_steps"] for r in results)
+        total_tool_calls = sum(r["metrics"]["total_tool_calls"] for r in results)
+        
         print(f"Tests completed: {len(results)} total, {success_count} successful, {len(results) - success_count} failed")
+        print(f"Overall step success rate: {step_success_rate:.1%}")
+        print(f"Total tool calls across all tests: {total_tool_calls}")
     else:
         print("Please specify --prompt ID to run a single test or --all to run all tests")
         sys.exit(1)

@@ -1,19 +1,19 @@
 # OpenRouter Provider Validator
 
-A tool for systematically testing and evaluating various OpenRouter.ai providers using predefined prompts with a focus on tool use capabilities.
+A tool for systematically testing and evaluating various OpenRouter.ai providers using predefined prompt sequences with a focus on tool use capabilities.
 
 ## Overview
 
-This project helps you assess the reliability and performance of different OpenRouter.ai providers by testing their ability to interact with a toy filesystem through tools. The tests are automated and results are stored for analysis and reporting.
+This project helps you assess the reliability and performance of different OpenRouter.ai providers by testing their ability to interact with a toy filesystem through tools. The tests use sequences of related prompts to evaluate the model's ability to maintain context and perform multi-step operations.
 
 ## Features
 
-- Configure and test multiple OpenRouter providers
-- Create and manage test prompts focused on tool use capabilities
-- Execute tests against a toy filesystem to evaluate performance
-- Analyze response data and errors
-- Generate detailed performance reports
-- Track token usage and provider-specific metrics
+- Test models with sequences of related prompts
+- Evaluate multi-step task completion capability
+- Automatically set up toy filesystem for testing
+- Track success rates and tool usage metrics
+- Generate comparative reports across models
+- Save detailed test results for analysis
 
 ## Architecture
 
@@ -21,21 +21,19 @@ The system consists of these core components:
 
 1. **Filesystem Client** (`client.py`) - Manages data storage and retrieval
 2. **MCP Server** (`mcp_server.py`) - Exposes filesystem operations as tools
-3. **Test Agent** (`agent.py`) - Executes tests and interacts with OpenRouter
-4. **Test Runner** (`test_runner.py`) - Orchestrates parallel test execution
-5. **Provider Configuration** (`provider_config.py`) - Manages provider settings
-6. **Metrics Extraction** (`metrics_extractor.py`) - Extracts metrics from responses and logs
-7. **Error Classification** (`error_classifier.py`) - Categorizes errors by pattern
-8. **Report Generation** (`report_generator.py`) - Creates human-readable reports
+3. **Test Agent** (`agent.py`) - Executes prompt sequences and interacts with OpenRouter
+4. **Test Runner** (`test_runner.py`) - Orchestrates automated test execution
+5. **Prompt Definitions** (`data/prompts.json`) - Defines test scenarios with prompt sequences
 
 ## Test Methodology
 
 The validator tests providers using a sequence of steps:
 
-1. A toy filesystem is created with sample files and directories
-2. Test prompts instruct the model to perform various file operations
-3. The system evaluates whether the model correctly uses tools to complete tasks
-4. Results are stored, analyzed, and summarized in reports
+1. A toy filesystem is initialized with sample files
+2. The agent sends a sequence of prompts for each test
+3. Each prompt builds on previous steps in a coherent workflow
+4. The system evaluates tool use and success rate for each step
+5. Results are stored and analyzed across models
 
 ## Requirements
 
@@ -59,83 +57,85 @@ The validator tests providers using a sequence of steps:
 
 ### Running Individual Tests
 
-Test a single prompt with a specific model and provider:
+Test a single prompt sequence with a specific model:
 
 ```bash
-python agent.py --model anthropic/claude-3.7-sonnet --prompt read_simple_file
-```
-
-Or use the simplified test runner:
-
-```bash
-python run_test.py read_simple_file
+python agent.py --model anthropic/claude-3.7-sonnet --prompt file_operations_sequence
 ```
 
 ### Running All Tests
 
-Run all prompts against a specific model/provider:
+Run all prompt sequences against a specific model:
 
 ```bash
 python agent.py --model anthropic/claude-3.7-sonnet --all
 ```
 
-### Automated Testing Across Providers
+### Automated Testing Across Models
 
-Run tests on all enabled providers with multiple models:
-
-```bash
-python test_runner.py
-```
-
-## Toy Filesystem Structure
-
-The toy filesystem used for testing includes:
-
-- `data/test_files/` - Base directory for test files
-  - `sample1.txt` - Simple text file for reading
-  - `sample2.txt` - Another sample file with different content
-  - `nested/` - Subdirectory for testing nested path operations
-    - `sample3.txt` - File in nested directory
-
-Tests will create, modify, and manipulate these files to evaluate tool use capabilities.
-
-## Test Prompts
-
-The system includes various test prompts focused on different file operations:
-
-- Reading files
-- Writing and appending to files
-- Creating directories
-- Searching for content
-- Copying and moving files
-- Handling errors
-- Executing sequences of operations
-
-These prompts are stored in `data/prompts.json` and can be customized.
-
-## Report Generation
-
-After running tests, you can generate reports with:
+Run same tests on multiple models for comparison:
 
 ```bash
-python -c "from report_generator import generate_and_save_all_reports; generate_and_save_all_reports()"
+python test_runner.py --models anthropic/claude-3.7-sonnet anthropic/claude-3.7-haiku
 ```
 
-Reports are saved to the `reports/` directory with timestamps.
+## Prompt Sequences
+
+Tests are organized as sequences of related prompts that build on each other. Examples include:
+
+### File Operations Sequence
+1. Read a file and describe contents
+2. Create a summary in a new file
+3. Read another file
+4. Append content to that file
+5. Create a combined file in a new directory
+
+### Search and Report
+1. Search files for specific content
+2. Create a report of search results
+3. Move the report to a different location
+
+### Error Handling
+1. Attempt to access non-existent files
+2. Document error handling approach
+3. Test error recovery capabilities
+
+The full set of test sequences is defined in `data/prompts.json` and can be customized.
+
+## Test Results
+
+Results include detailed metrics:
+
+- Overall success (pass/fail)
+- Success rate for individual steps
+- Number of tool calls per step
+- Latency measurements
+- Token usage statistics
+
+A summary report is generated with comparative statistics across models.
 
 ## Extending the System
 
-### Adding New Providers
+### Adding New Prompt Sequences
 
-Edit `data/providers.json` to add new provider configurations.
+Add new test scenarios to `data/prompts.json` following this format:
 
-### Creating New Test Prompts
+```json
+{
+  "id": "new_test_scenario",
+  "name": "Description of Test",
+  "description": "Detailed explanation of what this tests",
+  "sequence": [
+    "First prompt in sequence",
+    "Second prompt building on first",
+    "Third prompt continuing the task"  
+  ]
+}
+```
 
-Add new test cases to `data/prompts.json` following the existing format.
+### Customizing the Agent Behavior
 
-### Adding New Tools
-
-Extend the MCP Server in `mcp_server.py` to add new filesystem operations.
+Edit `agents/openrouter_validator.md` to modify the system prompt and agent behavior.
 
 ## License
 

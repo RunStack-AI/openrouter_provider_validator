@@ -1,23 +1,58 @@
 [
   {
-    "id": "tool_basic",
-    "name": "Basic Tool Use",
-    "prompt": "List all available providers and summarize how many are enabled and disabled.",
-    "category": "tool_use",
-    "expected_tools": ["list_providers", "get_stats"]
+    "id": "file_operations_sequence",
+    "name": "File Operations Sequence",
+    "description": "Series of prompts to test sequential file operations",
+    "sequence": [
+      "Let's examine the contents of data/test_files/sample1.txt. Could you read that file and tell me what it contains?",
+      "Great! Now based on the content of that file, could you create a summary and save it to data/test_files/summary1.md?",
+      "Now, please read sample2.txt in the same directory and tell me about its contents.",
+      "Please append a line to sample2.txt that says: \n\n'This line was added by the test agent.'",
+      "Finally, create a new directory called 'analysis' inside data/test_files and write a file called 'combined.txt' there that contains the contents of both sample files."
+    ]
   },
   {
-    "id": "tool_chain",
-    "name": "Tool Chain",
-    "prompt": "Create a new test prompt with ID 'code_review' that asks the model to review and optimize a Python function. Then list all prompts to confirm it was added.",
-    "category": "tool_use",
-    "expected_tools": ["save_prompt", "list_prompts"]
+    "id": "search_and_report",
+    "name": "Search and Report Test",
+    "description": "Tests searching for content and reporting results",
+    "sequence": [
+      "Please search all files in data/test_files for the word 'sample' and tell me where it appears.",
+      "Based on your search results, create a report file at data/test_files/search_results.md that lists all the occurrences.",
+      "Now, create a folder called 'reports' if it doesn't exist and move the search_results.md file there."
+    ]
   },
   {
-    "id": "tool_complex",
-    "name": "Complex Decision Making",
-    "prompt": "Analyze the test results for the model 'anthropic/claude-3.7-sonnet' and generate a summary of the error patterns. If there are no results yet, create a brief report explaining what we would look for in the analysis.",
-    "category": "reasoning",
-    "expected_tools": ["load_test_results", "generate_provider_summary", "save_report"]
+    "id": "error_handling",
+    "name": "Error Handling Test",
+    "description": "Tests how the model handles errors",
+    "sequence": [
+      "Please try to read a file that doesn't exist: data/test_files/nonexistent.txt. How would you handle this error?",
+      "Great thinking. Now create a file called data/test_files/error_log.txt and write a message explaining how you would handle the error.",
+      "Try to copy a file that doesn't exist to a new location and handle any errors properly."
+    ]
+  },
+  {
+    "id": "file_manipulation",
+    "name": "File Manipulation Test",
+    "description": "Tests copying, moving, and modifying files",
+    "sequence": [
+      "First, let's list all the contents of the data/test_files directory to see what we're working with.",
+      "Create a new file called 'original.txt' in data/test_files with the content 'This is the original file.'",
+      "Now make a copy of original.txt called 'copy.txt' in the same directory.",
+      "Modify copy.txt by appending the line: 'This is a modified copy.'",
+      "Now move copy.txt to the nested subdirectory."
+    ]
+  },
+  {
+    "id": "complex_operation",
+    "name": "Complex Operation Test",
+    "description": "Tests ability to perform a complex sequence of operations",
+    "sequence": [
+      "Let's create a simple project structure. First, create these folders: data/test_files/project/{src,tests,docs}",
+      "Create a file called data/test_files/project/README.md with content: '# Test Project\n\nThis is a test project created by the OpenRouter Provider Validator.'",
+      "Create a file in the src folder called main.py with this content: 'print(\"Hello, world!\")'",
+      "Create a file in the tests folder called test_main.py with this content: 'def test_hello():\n    assert True'",
+      "Now read all files in the project structure and create a file called data/test_files/project/docs/catalog.md that lists all files with their paths."
+    ]
   }
 ]
