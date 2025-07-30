@@ -1,26 +1,116 @@
 [
   {
-    "name": "anthropic",
-    "model": "anthropic/claude-3.7-sonnet",
-    "description": "Claude 3.7 Sonnet via Anthropic",
-    "enabled": true
+    "id": "anthropic",
+    "name": "Anthropic (via OpenRouter)",
+    "enabled": true,
+    "supported_models": [
+      "anthropic/claude-3-opus",
+      "anthropic/claude-3.7-sonnet",
+      "anthropic/claude-3-5-sonnet"
+    ],
+    "description": "Anthropic's Claude models known for their safety, helpfulness and strong tool use."
   },
   {
-    "name": "openai",
-    "model": "openai/gpt-4o",
-    "description": "GPT-4o via OpenAI",
-    "enabled": true
+    "id": "openai",
+    "name": "OpenAI (via OpenRouter)",
+    "enabled": true,
+    "supported_models": [
+      "openai/gpt-4o",
+      "openai/gpt-4-turbo"
+    ],
+    "description": "OpenAI's GPT models with strong tool use capabilities."
   },
   {
-    "name": "meta",
-    "model": "meta/llama-3-70b-instruct",
-    "description": "Llama 3 70B by Meta",
-    "enabled": true
+    "id": "google",
+    "name": "Google (via OpenRouter)",
+    "enabled": true,
+    "supported_models": [
+      "google/gemini-1.5-pro",
+      "google/gemini-1.5-flash"
+    ],
+    "description": "Google's Gemini models with tool use capabilities."
   },
   {
-    "name": "google",
-    "model": "google/gemini-1.5-pro",
-    "description": "Gemini 1.5 Pro by Google",
-    "enabled": false
+    "id": "meta",
+    "name": "Meta (via OpenRouter)",
+    "enabled": false,
+    "supported_models": [
+      "meta/llama-3-70b-instruct",
+      "meta/llama-3-8b-instruct"
+    ],
+    "description": "Meta's Llama models with varying degrees of tool use support."
+  },
+  {
+    "id": "mistral",
+    "name": "Mistral AI (via OpenRouter)",
+    "enabled": true,
+    "supported_models": [
+      "mistral/mistral-large",
+      "mistral/mistral-medium"
+    ],
+    "description": "Mistral AI's models with tool use capabilities."
+  },
+  {
+    "id": "deepinfra",
+    "name": "DeepInfra (via OpenRouter)",
+    "enabled": true,
+    "supported_models": [
+      "moonshot/kimi-k2"
+    ],
+    "description": "DeepInfra provider for Moonshot's Kimi-K2 model with context/output of 131K."
+  },
+  {
+    "id": "fireworks",
+    "name": "Fireworks (via OpenRouter)",
+    "enabled": true,
+    "supported_models": [
+      "moonshot/kimi-k2"
+    ],
+    "description": "Fireworks provider for Moonshot's Kimi-K2 model with context/output of 131K and tool use support."
+  },
+  {
+    "id": "baseten",
+    "name": "Baseten (via OpenRouter)",
+    "enabled": true,
+    "supported_models": [
+      "moonshot/kimi-k2"
+    ],
+    "description": "Baseten provider for Moonshot's Kimi-K2 model with context/output of 131K."
+  },
+  {
+    "id": "moonshotai",
+    "name": "Moonshot AI (via OpenRouter)",
+    "enabled": true,
+    "supported_models": [
+      "moonshot/kimi-k2"
+    ],
+    "description": "Direct provider for Moonshot's Kimi-K2 model with context/output of 131K."
+  },
+  {
+    "id": "parasail",
+    "name": "Parasail (via OpenRouter)",
+    "enabled": false,
+    "supported_models": [
+      "moonshot/kimi-k2"
+    ],
+    "description": "Parasail provider for Moonshot's Kimi-K2 model with context/output of 131K."
+  },
+  {
+    "id": "together",
+    "name": "Together (via OpenRouter)",
+    "enabled": false,
+    "supported_models": [
+      "moonshot/kimi-k2"
+    ],
+    "description": "Together provider for Moonshot's Kimi-K2 model with context/output of 131K."
+  },
+  {
+    "id": "groq",
+    "name": "Groq (via OpenRouter)",
+    "enabled": false,
+    "supported_models": [
+      "moonshot/kimi-k2"
+    ],
+    "description": "Groq provider for Moonshot's Kimi-K2 model with context of 131K and max output of 16K."
   }
 ]

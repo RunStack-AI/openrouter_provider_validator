@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 
 from client import FileSystemClient
 from mcp_server import MCPServer
+from provider_config import ProviderConfig
 
 # Load environment variables
 load_dotenv()
@@ -102,6 +103,8 @@ class OpenRouterClient:
         
         async with httpx.AsyncClient(timeout=120) as client:
             logger.info(f"Sending request to OpenRouter with model {model}")
+            if provider:
+                logger.info(f"Routing to provider: {provider}")
             response = await client.post(url, json=data, headers=headers)
             response.raise_for_status()
             response_data = response.json()
@@ -115,14 +118,39 @@ class ProviderTester:
         
         Args:
             model: Model identifier to test
-            provider: Optional provider to route to
+            provider: Optional provider to route to (overrides auto-detection)
         """
         self.model = model
         self.provider = provider
+        
+        # Auto-detect provider if not specified
+        if not self.provider:
+            self.provider = self._get_default_provider()
+            if self.provider:
+                logger.info(f"Auto-detected provider '{self.provider}' for model '{model}'")
+            else:
+                logger.warning(f"No enabled providers found for model '{model}'. Using default routing.")
+        
         self.openrouter_client = OpenRouterClient()
         self.filesystem_client = FileSystemClient()
         self.mcp_server = MCPServer(self.filesystem_client)
         self.conversation_history = []
+    
+    def _get_default_provider(self) -> Optional[str]:
+        """Get the default provider for the configured model.
+        
+        Returns:
+            Provider ID or None if no matching providers found
+        """
+        return ProviderConfig.get_default_provider_for_model(self.model)
+    
+    def _get_all_available_providers(self) -> List[Dict[str, Any]]:
+        """Get all available providers for the configured model.
+        
+        Returns:
+            List of provider configurations
+        """
+        return ProviderConfig.find_providers_for_model(self.model)
     
     def _setup_test_files(self):
         """Setup toy filesystem for testing."""
@@ -291,11 +319,25 @@ async def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="OpenRouter Provider Validator Test Agent")
     parser.add_argument("--model", default="anthropic/claude-3.7-sonnet", help="Model to test")
-    parser.add_argument("--provider", help="Provider to route to (optional)")
+    parser.add_argument("--provider", help="Provider to route to (optional, overrides auto-detection)")
     parser.add_argument("--prompt", help="Specific prompt ID to test (optional)")
     parser.add_argument("--all", action="store_true", help="Run all tests")
     parser.add_argument("--output", help="Output file for results (optional)")
+    parser.add_argument("--list-providers", action="store_true", help="List available providers for the specified model")
     args = parser.parse_args()
+    
+    # Special case: just list available providers
+    if args.list_providers:
+        providers = ProviderConfig.find_providers_for_model(args.model, enabled_only=False)
+        if providers:
+            print(f"\nAvailable providers for model '{args.model}':\n")
+            for provider in providers:
+                status = "Enabled" if provider.get("enabled", True) else "Disabled"
+                print(f"  - {provider['name']} (ID: {provider['id']}) - {status}")
+                print(f"    {provider.get('description', '')}\n")
+        else:
+            print(f"\nNo providers found for model '{args.model}'\n")
+        return
     
     # Create tester
     tester = ProviderTester(model=args.model, provider=args.provider)
@@ -311,7 +353,8 @@ async def main():
             json.dump(result, f, indent=2)
         
         # Print summary
-        print(f"Test completed: {'Success' if result['success'] else 'Failure'}")
+        provider_info = f" with provider '{result['provider']}'" if result['provider'] else ""
+        print(f"Test completed on model '{result['model']}'{provider_info}: {'Success' if result['success'] else 'Failure'}")
         print(f"Steps: {result['successful_steps']}/{result['total_steps']} successful")
         print(f"Tool calls: {result['metrics']['total_tool_calls']}")
         print(f"Full results saved to {output_file}")
@@ -330,14 +373,16 @@ async def main():
         
         # Print summary
         success_count = sum(1 for r in results if r["success"])
-        step_success_rate = sum(r["successful_steps"] for r in results) / sum(r["total_steps"] for r in results)
+        step_success_rate = sum(r["successful_steps"] for r in results) / sum(r["total_steps"] for r in results) if results else 0
         total_tool_calls = sum(r["metrics"]["total_tool_calls"] for r in results)
         
-        print(f"Tests completed: {len(results)} total, {success_count} successful, {len(results) - success_count} failed")
-        print(f"Overall step success rate: {step_success_rate:.1%}")
-        print(f"Total tool calls across all tests: {total_tool_calls}")
+        provider_name = results[0]["provider"] if results else "unknown"
+        print(f"Tests completed for model '{args.model}' with provider '{provider_name}':")
+        print(f"  {len(results)} total, {success_count} successful, {len(results) - success_count} failed")
+        print(f"  Overall step success rate: {step_success_rate:.1%}")
+        print(f"  Total tool calls across all tests: {total_tool_calls}")
     else:
-        print("Please specify --prompt ID to run a single test or --all to run all tests")
+        print("Please specify --prompt ID to run a single test, --all to run all tests, or --list-providers to see available providers")
         sys.exit(1)
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ This project helps you assess the reliability and performance of different OpenR
 - Automatically set up toy filesystem for testing
 - Track success rates and tool usage metrics
 - Generate comparative reports across models
+- Auto-detect and use appropriate providers for specific models
 - Save detailed test results for analysis
 
 ## Architecture
@@ -21,9 +22,11 @@ The system consists of these core components:
 
 1. **Filesystem Client** (`client.py`) - Manages data storage and retrieval
 2. **MCP Server** (`mcp_server.py`) - Exposes filesystem operations as tools
-3. **Test Agent** (`agent.py`) - Executes prompt sequences and interacts with OpenRouter
-4. **Test Runner** (`test_runner.py`) - Orchestrates automated test execution
-5. **Prompt Definitions** (`data/prompts.json`) - Defines test scenarios with prompt sequences
+3. **Provider Config** (`provider_config.py`) - Manages provider configurations and model routing
+4. **Test Agent** (`agent.py`) - Executes prompt sequences and interacts with OpenRouter
+5. **Test Runner** (`test_runner.py`) - Orchestrates automated test execution
+6. **Prompt Definitions** (`data/prompts.json`) - Defines test scenarios with prompt sequences
+7. **Provider Definitions** (`data/providers.json`) - Configures available providers and their supported models
 
 ## Test Methodology
 
@@ -55,6 +58,20 @@ The validator tests providers using a sequence of steps:
 
 ## Usage
 
+### Listing Available Providers
+
+List all available providers for a specific model:
+
+```bash
+python agent.py --model moonshot/kimi-k2 --list-providers
+```
+
+Or list providers for multiple models:
+
+```bash
+python test_runner.py --list-providers --models anthropic/claude-3.7-sonnet moonshot/kimi-k2
+```
+
 ### Running Individual Tests
 
 Test a single prompt sequence with a specific model:
@@ -63,12 +80,18 @@ Test a single prompt sequence with a specific model:
 python agent.py --model anthropic/claude-3.7-sonnet --prompt file_operations_sequence
 ```
 
-### Running All Tests
-
-Run all prompt sequences against a specific model:
+Test with a specific provider for a model (overriding auto-detection):
 
 ```bash
-python agent.py --model anthropic/claude-3.7-sonnet --all
+python agent.py --model moonshot/kimi-k2 --provider deepinfra --prompt file_operations_sequence
+```
+
+### Running All Tests
+
+Run all prompt sequences against a specific model (auto-detects provider):
+
+```bash
+python agent.py --model moonshot/kimi-k2 --all
 ```
 
 ### Automated Testing Across Models
@@ -76,8 +99,30 @@ python agent.py --model anthropic/claude-3.7-sonnet --all
 Run same tests on multiple models for comparison:
 
 ```bash
-python test_runner.py --models anthropic/claude-3.7-sonnet anthropic/claude-3.7-haiku
+python test_runner.py --models anthropic/claude-3.7-sonnet moonshot/kimi-k2
 ```
+
+With specific provider mappings:
+
+```bash
+python test_runner.py --models moonshot/kimi-k2 anthropic/claude-3.7-sonnet --providers "moonshot/kimi-k2:fireworks" "anthropic/claude-3.7-sonnet:anthropic"
+```
+
+## Provider Configuration
+
+Providers are configured in `data/providers.json` with the following structure:
+
+```json
+{
+  "id": "provider_id",
+  "name": "Provider Display Name",
+  "enabled": true,
+  "supported_models": ["model/id1", "model/id2"],
+  "description": "Description of the provider"
+}
+```
+
+The system automatically matches models to appropriate providers based on the `supported_models` field. This allows testing different provider implementations of the same model (e.g., multiple providers for Moonshot/Kimi-K2).
 
 ## Prompt Sequences
 
@@ -112,9 +157,25 @@ Results include detailed metrics:
 - Latency measurements
 - Token usage statistics
 
-A summary report is generated with comparative statistics across models.
+A summary report is generated with comparative statistics across models and providers.
 
 ## Extending the System
+
+### Adding New Models and Providers
+
+Add new provider configurations to `data/providers.json` to test additional models:
+
+```json
+{
+  "id": "new_provider_id",
+  "name": "New Provider Name (via OpenRouter)",
+  "enabled": true,
+  "supported_models": [
+    "vendorid/modelname"
+  ],
+  "description": "Description of the provider and model"
+}
+```
 
 ### Adding New Prompt Sequences
 
