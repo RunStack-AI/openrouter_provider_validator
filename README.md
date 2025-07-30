@@ -22,12 +22,23 @@ This project helps you assess the reliability and performance of different OpenR
 The system consists of these core components:
 
 1. **Filesystem Client** (`client.py`) - Manages data storage and retrieval
-2. **MCP Server** (`mcp_server.py`) - Exposes filesystem operations as tools
-3. **OpenRouter Client** (`openrouter_client.py`) - Fetches model and provider information from API
+2. **Filesystem Test Helper** (`filesystem_test_helper.py`) - Initializes test environments
+3. **MCP Server** (`mcp_server.py`) - Exposes filesystem operations as tools through FastMCP
 4. **Provider Config** (`provider_config.py`) - Manages provider configurations and model routing
 5. **Test Agent** (`agent.py`) - Executes prompt sequences and interacts with OpenRouter
 6. **Test Runner** (`test_runner.py`) - Orchestrates automated test execution
 7. **Prompt Definitions** (`data/prompts.json`) - Defines test scenarios with prompt sequences
+
+## Technical Implementation
+
+The validator uses the PydanticAI framework to create a robust testing system:
+
+- **Agent Framework**: Uses the `pydantic_ai.Agent` class to manage interactions and tool calling
+- **MCP Server**: Implements a FastMCP server that exposes filesystem operations as tools
+- **Model Interface**: Connects to OpenRouter through the `OpenAIModel` and `OpenAIProvider` classes
+- **Test Orchestration**: Manages testing across providers and models, collecting metrics and results
+
+The test agent creates instances of the Agent class to run tests while tracking performance metrics.
 
 ## Test Methodology
 
@@ -43,7 +54,7 @@ The validator tests providers using a sequence of steps:
 
 - Python 3.9 or higher
 - An OpenRouter API key
-- Required packages: `pydantic`, `httpx`, `python-dotenv`
+- Required packages: `pydantic`, `httpx`, `python-dotenv`, `pydantic-ai`
 
 ## Setup
 
