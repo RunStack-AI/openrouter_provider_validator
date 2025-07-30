@@ -1,0 +1,91 @@
+{
+  "name": "openrouter_validator",
+  "description": "A tool for systematically testing and evaluating OpenRouter.ai providers with a focus on tool use capabilities",
+  "url": "https://github.com/example/openrouter_provider_validator",
+  "provider": {
+    "name": "AI Test Services",
+    "url": "https://example.com/ai-test-services"
+  },
+  "version": "1.0.0",
+  "documentationUrl": "https://github.com/example/openrouter_provider_validator/docs",
+  "streaming": true,
+  "pushNotifications": false,
+  "stateTransitionHistory": true,
+  "authentication": {
+    "scheme": "Bearer",
+    "credentials": [
+      {
+        "type": "api_key",
+        "description": "OpenRouter API key required for testing providers",
+        "required": true
+      }
+    ]
+  },
+  "defaultInputModes": [
+    "text/plain"
+  ],
+  "defaultOutputModes": [
+    "text/plain",
+    "application/json"
+  ],
+  "skills": [
+    {
+      "id": "provider_management",
+      "name": "Provider Management",
+      "description": "Configure and manage OpenRouter provider definitions for testing",
+      "tags": [
+        "configuration",
+        "management"
+      ],
+      "examples": [
+        {
+          "input": "List all available providers",
+          "output": "Here are the currently configured providers: anthropic, openai, meta, google (disabled)",
+          "description": "Lists all configured providers with their status"
+        },
+        {
+          "input": "Add a new provider named 'cohere' with model 'cohere/command-r'",
+          "output": "Successfully added the provider 'cohere' with model 'cohere/command-r'. It is now enabled for testing.",
+          "description": "Adds a new provider configuration"
+        }
+      ]
+    },
+    {
+      "id": "test_execution",
+      "name": "Test Execution",
+      "description": "Execute tests against OpenRouter providers and collect results",
+      "tags": [
+        "testing",
+        "execution"
+      ],
+      "examples": [
+        {
+          "input": "Run a test for the 'anthropic' provider using prompt 'tool_basic'",
+          "output": "Test completed for anthropic/claude-3.7-sonnet with prompt 'tool_basic'. The test was successful.",
+          "description": "Executes a single test with a specific provider and prompt"
+        },
+        {
+          "input": "Generate a summary report for all test results",
+          "output": "Report generated and saved as 'summary_20250731_123045.md'. Overall success rate across all providers is 87.5%.",
+          "description": "Creates a comprehensive summary report of all test results"
+        }
+      ]
+    },
+    {
+      "id": "error_analysis",
+      "name": "Error Analysis",
+      "description": "Analyze and categorize errors encountered during provider testing",
+      "tags": [
+        "analysis",
+        "errors"
+      ],
+      "examples": [
+        {
+          "input": "Analyze error patterns for model 'openai/gpt-4o'",
+          "output": "Error analysis for openai/gpt-4o:\n- 60% rate_limit errors\n- 30% timeout errors\n- 10% tool_format errors\nMost errors occurred with the 'openai' provider.",
+          "description": "Analyzes error patterns for a specific model"
+        }
+      ]
+    }
+  ]
+}
