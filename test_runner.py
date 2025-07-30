@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 from agent import ProviderTester
+from filesystem_test_helper import FileSystemTestHelper
 from provider_config import ProviderConfig
 
 # Configure logging
@@ -54,9 +55,8 @@ async def run_tests(
     ]
     
     # Load all prompts
-    from client import FileSystemClient
-    filesystem_client = FileSystemClient()
-    all_prompts = filesystem_client.load_prompts()
+    test_helper = FileSystemTestHelper()
+    all_prompts = test_helper.load_prompts()
     
     # Filter to specified prompts if provided
     if prompts:

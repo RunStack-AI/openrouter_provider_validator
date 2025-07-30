@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from client import FileSystemClient
+from filesystem_test_helper import FileSystemTestHelper
 from provider_config import ProviderConfig
 
 # Load environment variables
@@ -75,8 +76,8 @@ class ProviderTester:
         """
         self.model = model
         self.provider = provider
-        self.filesystem_client = FileSystemClient()
-        self.filesystem_client.initialize_test_files()
+        self.test_helper = FileSystemTestHelper()
+        self.test_helper.initialize_test_files()
         
         self.messages = []
         self.conversation = []
@@ -307,52 +308,52 @@ class ProviderTester:
         try:
             if name == "list_files":
                 directory = arguments.get("directory", ".")
-                result = self.filesystem_client.list_files(directory)
+                result = self.test_helper.list_files(directory)
             elif name == "read_file":
                 file_path = arguments.get("file_path")
                 if not file_path:
                     raise ValueError("file_path is required")
-                result = self.filesystem_client.read_file(file_path)
+                result = self.test_helper.read_file(file_path)
             elif name == "write_file":
                 file_path = arguments.get("file_path")
                 content = arguments.get("content", "")
                 if not file_path:
                     raise ValueError("file_path is required")
-                self.filesystem_client.write_file(file_path, content)
+                self.test_helper.write_file(file_path, content)
                 result = f"File written successfully to {file_path}"
             elif name == "append_file":
                 file_path = arguments.get("file_path")
                 content = arguments.get("content", "")
                 if not file_path:
                     raise ValueError("file_path is required")
-                self.filesystem_client.append_file(file_path, content)
+                self.test_helper.append_file(file_path, content)
                 result = f"Content appended successfully to {file_path}"
             elif name == "create_directory":
                 directory = arguments.get("directory")
                 if not directory:
                     raise ValueError("directory is required")
-                self.filesystem_client.create_directory(directory)
+                self.test_helper.create_directory(directory)
                 result = f"Directory created successfully at {directory}"
             elif name == "copy_file":
                 source = arguments.get("source")
                 destination = arguments.get("destination")
                 if not source or not destination:
                     raise ValueError("source and destination are required")
-                self.filesystem_client.copy_file(source, destination)
+                self.test_helper.copy_file(source, destination)
                 result = f"File copied successfully from {source} to {destination}"
             elif name == "move_file":
                 source = arguments.get("source")
                 destination = arguments.get("destination")
                 if not source or not destination:
                     raise ValueError("source and destination are required")
-                self.filesystem_client.move_file(source, destination)
+                self.test_helper.move_file(source, destination)
                 result = f"File moved successfully from {source} to {destination}"
             elif name == "search_files":
                 directory = arguments.get("directory", ".")
                 pattern = arguments.get("pattern", "")
                 if not pattern:
                     raise ValueError("pattern is required")
-                result = self.filesystem_client.search_files(directory, pattern)
+                result = self.test_helper.search_files(directory, pattern)
             else:
                 result = f"Unknown tool: {name}"
         except Exception as e:
@@ -465,7 +466,7 @@ class ProviderTester:
         self.total_latency = 0
         
         # Re-initialize the test environment
-        self.filesystem_client.initialize_test_files()
+        self.test_helper.initialize_test_files()
         
         # Load the system prompt
         system_prompt = await self.load_system_prompt()
@@ -473,7 +474,7 @@ class ProviderTester:
         self.conversation.append(system_message)
         
         # Load the prompt sequence
-        prompt_sequence = self.filesystem_client.load_prompt_sequence(prompt_id)
+        prompt_sequence = self.test_helper.load_prompt_sequence(prompt_id)
         if not prompt_sequence:
             return {
                 "model": self.model,
@@ -603,8 +604,8 @@ async def main():
     
     if args.all:
         # Run all prompt sequences
-        filesystem_client = FileSystemClient()
-        prompts = filesystem_client.load_prompts()
+        test_helper = FileSystemTestHelper()
+        prompts = test_helper.load_prompts()
         for prompt in prompts:
             print(f"\nRunning test: {prompt['id']}")
             await tester.run_test(prompt["id"])
