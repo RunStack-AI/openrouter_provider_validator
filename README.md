@@ -14,6 +14,7 @@ This project helps you assess the reliability and performance of different OpenR
 - Track success rates and tool usage metrics
 - Generate comparative reports across models
 - Auto-detect and use appropriate providers for specific models
+- Test the same model across multiple providers automatically
 - Save detailed test results for analysis
 
 ## Architecture
@@ -94,6 +95,16 @@ Run all prompt sequences against a specific model (auto-detects provider):
 python agent.py --model moonshot/kimi-k2 --all
 ```
 
+### Testing With All Providers
+
+Test a model with all its enabled providers automatically:
+
+```bash
+python test_runner.py --models moonshot/kimi-k2 --all-providers
+```
+
+This will automatically run all tests for each enabled provider configured for the moonshot/kimi-k2 model, generating a comprehensive comparison report.
+
 ### Automated Testing Across Models
 
 Run same tests on multiple models for comparison:
@@ -157,7 +168,7 @@ Results include detailed metrics:
 - Latency measurements
 - Token usage statistics
 
-A summary report is generated with comparative statistics across models and providers.
+A summary report is generated with comparative statistics across models and providers. When testing with multiple providers, the system generates provider comparison tables showing which provider performs best for each model.
 
 ## Extending the System
 

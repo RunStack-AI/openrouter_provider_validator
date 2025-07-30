@@ -32,7 +32,8 @@ async def run_tests(
     models: Optional[List[str]] = None,
     prompts: Optional[List[str]] = None,
     providers: Optional[Dict[str, str]] = None, 
-    output_dir: Optional[str] = None
+    output_dir: Optional[str] = None,
+    test_all_providers: bool = False
 ):
     """Run tests for specified models and prompts.
     
@@ -41,6 +42,7 @@ async def run_tests(
         prompts: List of prompt IDs to test (defaults to all)
         providers: Dictionary mapping models to specific providers (optional)
         output_dir: Directory to save results (defaults to "results")
+        test_all_providers: Whether to test all enabled providers for each model
     """
     output_dir = output_dir or "results"
     os.makedirs(output_dir, exist_ok=True)
@@ -60,47 +62,73 @@ async def run_tests(
     if prompts:
         all_prompts = [p for p in all_prompts if p["id"] in prompts]
     
-    results = {}
+    combined_results = {}
     
     # Run tests for each model
     for model in models:
         logger.info(f"Testing model: {model}")
+        combined_results[model] = {}
         
-        # Check if a specific provider was requested for this model
-        provider = None
-        if providers and model in providers:
-            provider = providers[model]
-            logger.info(f"Using specified provider: {provider}")
+        if test_all_providers:
+            # Get all enabled providers for this model
+            model_providers = ProviderConfig.find_providers_for_model(model, enabled_only=True)
+            if not model_providers:
+                logger.warning(f"No enabled providers found for model {model}, using default routing")
+                model_providers = [{"id": None, "name": "Default Routing"}]
         else:
-            # Check if we can auto-detect a provider
-            provider = ProviderConfig.get_default_provider_for_model(model)
-            if provider:
-                logger.info(f"Auto-detected provider: {provider}")
+            # Check if a specific provider was requested for this model
+            provider_id = None
+            if providers and model in providers:
+                provider_id = providers[model]
+                logger.info(f"Using specified provider: {provider_id}")
             else:
-                logger.info(f"No specific provider found for model {model}, using default routing")
-        
-        model_results = []
-        tester = ProviderTester(model=model, provider=provider)
-        
-        for prompt in all_prompts:
-            logger.info(f"Running test: {prompt['id']}")
-            result = await tester.run_test(prompt["id"])
-            model_results.append(result)
-            
-            # Save individual result
-            result_file = os.path.join(output_dir, f"{model.replace('/', '_')}_{prompt['id']}.json")
-            with open(result_file, "w") as f:
-                json.dump(result, f, indent=2)
+                # Check if we can auto-detect a provider
+                provider_id = ProviderConfig.get_default_provider_for_model(model)
+                if provider_id:
+                    logger.info(f"Auto-detected provider: {provider_id}")
+                else:
+                    logger.info(f"No specific provider found for model {model}, using default routing")
+                    
+            provider_name = "Default Routing"
+            provider_config = ProviderConfig.get_provider(provider_id) if provider_id else None
+            if provider_config:
+                provider_name = provider_config.get("name", provider_id)
                 
-        results[model] = model_results
+            model_providers = [{"id": provider_id, "name": provider_name}]
+        
+        logger.info(f"Running tests for model {model} with {len(model_providers)} provider(s)")
+        
+        # Run tests for each provider of this model
+        for provider_config in model_providers:
+            provider_id = provider_config.get("id")
+            provider_name = provider_config.get("name", provider_id if provider_id else "Default Routing")
+            
+            logger.info(f"Running tests with provider: {provider_name}")
+            
+            provider_results = []
+            tester = ProviderTester(model=model, provider=provider_id)
+            
+            for prompt in all_prompts:
+                logger.info(f"Running test: {prompt['id']}")
+                result = await tester.run_test(prompt["id"])
+                provider_results.append(result)
+                
+                # Save individual result
+                provider_suffix = f"_{provider_id}" if provider_id else ""
+                result_file = os.path.join(output_dir, f"{model.replace('/', '_')}_{prompt['id']}{provider_suffix}.json")
+                with open(result_file, "w") as f:
+                    json.dump(result, f, indent=2)
+            
+            # Save results for this provider
+            combined_results[model][provider_id or "default"] = provider_results
     
     # Save combined results
     combined_results_file = os.path.join(output_dir, f"combined_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
     with open(combined_results_file, "w") as f:
-        json.dump(results, f, indent=2)
+        json.dump(combined_results, f, indent=2)
     
     # Generate summary report
-    report = generate_summary_report(results)
+    report = generate_summary_report(combined_results)
     report_file = os.path.join(output_dir, f"summary_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
     with open(report_file, "w") as f:
         f.write(report)
@@ -108,13 +136,13 @@ async def run_tests(
     logger.info(f"Tests completed. Results saved to {output_dir}")
     logger.info(f"Summary report: {report_file}")
     
-    return results
+    return combined_results
 
 def generate_summary_report(results):
     """Generate a markdown summary report from test results.
     
     Args:
-        results: Dictionary of test results by model
+        results: Nested dictionary of test results by model and provider
         
     Returns:
         Markdown formatted report
@@ -122,45 +150,64 @@ def generate_summary_report(results):
     report = ["# OpenRouter Provider Validator Test Report"]
     report.append(f"\n## Summary - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
     
-    # Add overall statistics
-    total_tests = sum(len(model_results) for model_results in results.values())
-    total_successful = sum(sum(1 for r in model_results if r["success"]) for model_results in results.values())
+    # Count total tests
+    total_tests = 0
+    total_successful = 0
+    
+    for model_results in results.values():
+        for provider_results in model_results.values():
+            total_tests += len(provider_results)
+            total_successful += sum(1 for r in provider_results if r["success"])
+    
     overall_success_rate = total_successful / total_tests if total_tests > 0 else 0
     
     report.append(f"Total tests: {total_tests}")
     report.append(f"Successful tests: {total_successful} ({overall_success_rate:.1%})\n")
     
     # Add model-specific sections
-    report.append("## Results by Model\n")
+    report.append("## Results by Model and Provider\n")
     
     for model, model_results in results.items():
-        # Get the provider name from the first result
-        provider_name = model_results[0]["provider"] if model_results else "Unknown"
+        report.append(f"### Model: {model}\n")
         
-        successful = sum(1 for r in model_results if r["success"])
-        success_rate = successful / len(model_results) if model_results else 0
+        # Provider comparison table
+        report.append("| Provider | Tests | Success Rate | Avg Tool Calls | Avg Steps | Avg Latency |")
+        report.append("| -------- | ----- | ----------- | -------------- | --------- | ----------- |")
         
-        report.append(f"### {model} (Provider: {provider_name})")
-        report.append(f"Tests: {len(model_results)}")
-        report.append(f"Successful: {successful} ({success_rate:.1%})")
-        
-        # Calculate average metrics
-        avg_tool_calls = sum(r["metrics"]["total_tool_calls"] for r in model_results) / len(model_results) if model_results else 0
-        avg_step_success = sum(r["successful_steps"] / r["total_steps"] for r in model_results) / len(model_results) if model_results else 0
-        avg_latency = sum(r["metrics"]["latency_ms"] for r in model_results) / len(model_results) if model_results else 0
-        
-        report.append(f"Average tool calls per test: {avg_tool_calls:.2f}")
-        report.append(f"Average step success rate: {avg_step_success:.1%}")
-        report.append(f"Average latency: {avg_latency:.0f}ms\n")
-        
-        # Add prompt-specific details
-        report.append("| Prompt | Success | Steps | Tool Calls |")
-        report.append("| ------ | ------- | ----- | ---------- |")
-        
-        for r in model_results:
-            report.append(f"| {r['prompt_id']} | {'✓' if r['success'] else '✗'} | {r['successful_steps']}/{r['total_steps']} | {r['metrics']['total_tool_calls']} |")
+        for provider_id, provider_results in model_results.items():
+            if not provider_results:
+                continue
+                
+            # Get provider name from the first result or use the ID
+            provider_name = provider_results[0].get("provider", provider_id) if provider_results else provider_id
+            
+            # Calculate statistics
+            successful = sum(1 for r in provider_results if r["success"])
+            success_rate = successful / len(provider_results) if provider_results else 0
+            
+            avg_tool_calls = sum(r["metrics"]["total_tool_calls"] for r in provider_results) / len(provider_results) if provider_results else 0
+            avg_steps = sum(r["successful_steps"] / r["total_steps"] for r in provider_results) / len(provider_results) if provider_results else 0
+            avg_latency = sum(r["metrics"]["latency_ms"] for r in provider_results) / len(provider_results) if provider_results else 0
+            
+            report.append(f"| {provider_name} | {len(provider_results)} | {success_rate:.1%} | {avg_tool_calls:.1f} | {avg_steps:.1%} | {avg_latency:.0f}ms |")
         
         report.append("\n")
+        
+        # Detailed results for each provider
+        for provider_id, provider_results in model_results.items():
+            if not provider_results:
+                continue
+                
+            provider_name = provider_results[0].get("provider", provider_id) if provider_results else provider_id
+            report.append(f"#### Provider: {provider_name}\n")
+            
+            report.append("| Prompt | Success | Steps | Tool Calls | Latency |")
+            report.append("| ------ | ------- | ----- | ---------- | ------- |")
+            
+            for r in provider_results:
+                report.append(f"| {r['prompt_id']} | {'✓' if r['success'] else '✗'} | {r['successful_steps']}/{r['total_steps']} | {r['metrics']['total_tool_calls']} | {r['metrics']['latency_ms']}ms |")
+            
+            report.append("\n")
     
     return "\n".join(report)
 
@@ -171,6 +218,7 @@ async def main():
     parser.add_argument("--providers", nargs="+", help="Providers to use in format 'model:provider' (space separated)")
     parser.add_argument("--output-dir", default="results", help="Directory to save results")
     parser.add_argument("--list-providers", action="store_true", help="List available providers for each model")
+    parser.add_argument("--all-providers", action="store_true", help="Test all enabled providers for each model")
     args = parser.parse_args()
     
     # Special case: list available providers for specified models
@@ -208,7 +256,8 @@ async def main():
         models=args.models, 
         prompts=args.prompts, 
         providers=provider_dict, 
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        test_all_providers=args.all_providers
     )
 
 if __name__ == "__main__":
