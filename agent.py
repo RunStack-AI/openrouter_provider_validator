@@ -1,389 +1,616 @@
 #!/usr/bin/env python
-"""OpenRouter Provider Validator - Test Agent
+"""OpenRouter Provider Validator Test Agent.
 
-CLI tool for running tests against the toy filesystem.
+This agent runs tests against various OpenRouter providers to assess their functionality
+with file system operations.
 """
 
 import argparse
 import asyncio
 import json
-import logging
 import os
-import sys
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional, Union, TypedDict
 
 import httpx
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
 
 from client import FileSystemClient
-from mcp_server import MCPServer
 from provider_config import ProviderConfig
 
 # Load environment variables
 load_dotenv()
 
+# Get API key from environment
+api_key = os.getenv("OPENROUTER_API_KEY")
+if not api_key:
+    raise ValueError("OPENROUTER_API_KEY must be set in environment or .env file")
+
+# Constants for OpenRouter API
+ROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+ROUTER_SITE_URL = "https://provider-validator.example.com"
+ROUTER_APP_TITLE = "OpenRouter Provider Validator"
+
 # Configure logging
-logging_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-log_dir = Path("logs")
-log_dir.mkdir(exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format=logging_format,
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(log_dir / f"agent_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
-    ]
-)
+import logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("validator")
 
-logger = logging.getLogger("agent")
+class ModelRequestParameters(BaseModel):
+    """Parameters for a model request."""
+    tools: Optional[List[Dict[str, Any]]] = Field(None, description="List of tools to make available")
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(None, description="Tool choice strategy")
 
-class OpenRouterClient:
-    """Client for interacting with the OpenRouter API."""
-    
-    def __init__(self, api_key: Optional[str] = None):
-        """Initialize the OpenRouter client.
-        
-        Args:
-            api_key: OpenRouter API key (defaults to OPENROUTER_API_KEY environment variable)
-        """
-        self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
-        if not self.api_key:
-            raise ValueError("OPENROUTER_API_KEY not set")
-        
-        self.base_url = "https://openrouter.ai/api/v1"
-    
-    async def chat_completion(
-        self, 
-        messages: List[Dict[str, Any]], 
-        model: str,
-        provider: Optional[str] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        temperature: float = 0.2,
-        max_tokens: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """Create a chat completion via OpenRouter.
-        
-        Args:
-            messages: List of chat messages
-            model: Model identifier (e.g., anthropic/claude-3-opus)
-            provider: Optional provider routing override
-            tools: Optional tool definitions
-            temperature: Sampling temperature
-            max_tokens: Max tokens to generate
-            
-        Returns:
-            OpenRouter API response
-        """
-        url = f"{self.base_url}/chat/completions"
-        
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "HTTP-Referer": "https://github.com/example/openrouter-validator",
-            "X-Title": "OpenRouter Provider Validator",
-            "Content-Type": "application/json"
-        }
-        
-        data = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "tool_choice": "auto"
-        }
-        
-        if provider:
-            data["route"] = provider
-            
-        if tools:
-            data["tools"] = tools
-            
-        if max_tokens:
-            data["max_tokens"] = max_tokens
-        
-        async with httpx.AsyncClient(timeout=120) as client:
-            logger.info(f"Sending request to OpenRouter with model {model}")
-            if provider:
-                logger.info(f"Routing to provider: {provider}")
-            response = await client.post(url, json=data, headers=headers)
-            response.raise_for_status()
-            response_data = response.json()
-            return response_data
+class ChatMessage(BaseModel):
+    """A single message in a chat conversation."""
+    role: str = Field(..., description="Role of the message sender: system, user, assistant or tool")
+    content: Optional[str] = Field(None, description="Content of the message")
+    name: Optional[str] = Field(None, description="Name of the tool")
+    tool_calls: Optional[List[Dict[str, Any]]] = Field(None, description="Tool calls made by the assistant")
+    tool_call_id: Optional[str] = Field(None, description="ID of the tool call this message is responding to")
+
+class TestResults(TypedDict, total=False):
+    """Results of a test run."""
+    model: str
+    provider: str  
+    prompt_id: str
+    success: bool
+    total_steps: int
+    successful_steps: int
+    messages: List[Dict[str, Any]]
+    metrics: Dict[str, Any]
 
 class ProviderTester:
-    """Test runner for OpenRouter providers using the toy filesystem."""
+    """Test agent for evaluating OpenRouter providers."""
     
-    def __init__(self, model: str, provider: Optional[str] = None):
+    def __init__(self, model="anthropic/claude-3.7-sonnet", provider=None):
         """Initialize the tester.
         
         Args:
-            model: Model identifier to test
-            provider: Optional provider to route to (overrides auto-detection)
+            model: The model to test
+            provider: Specific provider to use (optional)
         """
         self.model = model
         self.provider = provider
-        
-        # Auto-detect provider if not specified
-        if not self.provider:
-            self.provider = self._get_default_provider()
-            if self.provider:
-                logger.info(f"Auto-detected provider '{self.provider}' for model '{model}'")
-            else:
-                logger.warning(f"No enabled providers found for model '{model}'. Using default routing.")
-        
-        self.openrouter_client = OpenRouterClient()
         self.filesystem_client = FileSystemClient()
-        self.mcp_server = MCPServer(self.filesystem_client)
-        self.conversation_history = []
-    
-    def _get_default_provider(self) -> Optional[str]:
-        """Get the default provider for the configured model.
+        self.filesystem_client.initialize_test_files()
+        
+        self.messages = []
+        self.conversation = []
+        self.tool_calls_count = 0
+        self.send_count = 0
+        self.total_latency = 0
+        
+    async def load_system_prompt(self) -> str:
+        """Load the system prompt for the agent.
         
         Returns:
-            Provider ID or None if no matching providers found
+            System prompt string
         """
-        return ProviderConfig.get_default_provider_for_model(self.model)
+        system_prompt_file = Path("agents/openrouter_validator.md")
+        if not system_prompt_file.exists():
+            # Create default system prompt if file doesn't exist
+            system_prompt = (
+                "# OpenRouter Provider Validator Test Agent\n\n"
+                "You are a test agent evaluating file system operations through tools. "  
+                "Your task is to follow instructions exactly, making use of the available tools."
+                "\n\nPlease make sure to carry out each step of the instructions completely and accurately."
+                "\n\n"
+                "DO NOT make assumptions about file contents, paths, or structures unless explicitly specified."
+                "Always use the appropriate tools to verify information or make changes.\n"
+            )
+            os.makedirs(system_prompt_file.parent, exist_ok=True)
+            with open(system_prompt_file, "w") as f:
+                f.write(system_prompt)
+        else:
+            with open(system_prompt_file, "r") as f:
+                system_prompt = f.read()
+                
+        return system_prompt
     
-    def _get_all_available_providers(self) -> List[Dict[str, Any]]:
-        """Get all available providers for the configured model.
+    def get_tools(self) -> List[Dict[str, Any]]:
+        """Get the tool definitions for the model.
         
         Returns:
-            List of provider configurations
+            List of tool definitions
         """
-        return ProviderConfig.find_providers_for_model(self.model)
-    
-    def _setup_test_files(self):
-        """Setup toy filesystem for testing."""
-        # Create test directories
-        self.filesystem_client.create_folders(["data/test_files", "data/test_files/nested"])
-        
-        # Create sample files for testing
-        sample_files = [
-            ("data/test_files/sample1.txt", "This is sample file 1\nIt has multiple lines\nFor testing file reading operations."),
-            ("data/test_files/sample2.txt", "Sample file 2 contains different content\nUseful for testing searching functionality."),
-            ("data/test_files/nested/sample3.txt", "This is a nested file\nLocated in a subdirectory\nFor testing nested path operations.")
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "description": "List files in a directory",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "directory": {
+                                "type": "string",
+                                "description": "Directory to list files from"
+                            }
+                        },
+                        "required": ["directory"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read content from a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {
+                                "type": "string",
+                                "description": "Path to the file to read"
+                            }
+                        },
+                        "required": ["file_path"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "description": "Write content to a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {
+                                "type": "string",
+                                "description": "Path to the file to write to"
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Content to write to the file"
+                            }
+                        },
+                        "required": ["file_path", "content"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "append_file",
+                    "description": "Append content to a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {
+                                "type": "string",
+                                "description": "Path to the file to append to"
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Content to append to the file"
+                            }
+                        },
+                        "required": ["file_path", "content"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_directory",
+                    "description": "Create a new directory",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "directory": {
+                                "type": "string",
+                                "description": "Path of the directory to create"
+                            }
+                        },
+                        "required": ["directory"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "copy_file",
+                    "description": "Copy a file to a new location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "source": {
+                                "type": "string",
+                                "description": "Source file path"
+                            },
+                            "destination": {
+                                "type": "string",
+                                "description": "Destination file path"
+                            }
+                        },
+                        "required": ["source", "destination"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "move_file",
+                    "description": "Move a file to a new location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "source": {
+                                "type": "string",
+                                "description": "Source file path"
+                            },
+                            "destination": {
+                                "type": "string",
+                                "description": "Destination file path"
+                            }
+                        },
+                        "required": ["source", "destination"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_files",
+                    "description": "Search for content in files",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "directory": {
+                                "type": "string",
+                                "description": "Directory to search in"
+                            },
+                            "pattern": {
+                                "type": "string",
+                                "description": "Pattern to search for"
+                            }
+                        },
+                        "required": ["directory", "pattern"]
+                    }
+                }
+            }
         ]
-        
-        for filepath, content in sample_files:
-            self.filesystem_client.write_file(filepath, content)
-        
-        logger.info("Toy filesystem setup complete")
     
-    async def run_test(self, prompt_id: str) -> Dict[str, Any]:
-        """Run a single test with the specified prompt.
+    async def process_tool_call(self, tool_call: Dict[str, Any]) -> Dict[str, Any]:
+        """Process a tool call and return the result.
         
         Args:
-            prompt_id: ID of the prompt to test with
+            tool_call: Tool call from the assistant
             
         Returns:
-            Test result dictionary
+            Tool response message
         """
-        # Ensure test files exist
-        self._setup_test_files()
+        function = tool_call.get("function", {})
+        name = function.get("name")
+        arguments = function.get("arguments", "{}")
         
-        # Clear conversation history for new test
-        self.conversation_history = []
-        
-        # Load prompt
-        prompts = self.filesystem_client.load_prompts()
-        prompt = next((p for p in prompts if p.get("id") == prompt_id), None)
-        
-        if not prompt:
-            logger.error(f"Prompt {prompt_id} not found")
-            return {"success": False, "error": f"Prompt {prompt_id} not found"}
-        
-        # Load system prompt from agent profile
-        system_prompt = "You are a helpful assistant that interacts with the filesystem. Use the available tools to complete tasks."
-        if os.path.exists("agents/openrouter_validator.md"):
-            with open("agents/openrouter_validator.md", "r") as f:
-                system_prompt = f.read()
-        
-        # Setup initial messages
-        messages = [
-            {"role": "system", "content": system_prompt}
-        ]
-        
-        # Get tool definitions
-        tools = self.mcp_server.get_tools()
-        
-        # Track metrics
-        start_time = datetime.now()
-        total_tool_calls = 0
-        successful_steps = 0
-        sequence = prompt.get("sequence", [prompt.get("content", "")])  # Handle both single prompts and sequences
-        step_results = []
-        
-        # Execute prompt sequence
-        for i, step_prompt in enumerate(sequence):
-            logger.info(f"Running step {i+1}/{len(sequence)} for prompt {prompt_id}")
-            
-            # Add this step's prompt to messages
-            messages.append({"role": "user", "content": step_prompt})
-            
+        # Ensure arguments is a dictionary
+        if isinstance(arguments, str):
             try:
-                # Send request to OpenRouter
-                response = await self.openrouter_client.chat_completion(
-                    messages=messages,
-                    model=self.model,
-                    provider=self.provider,
-                    tools=tools,
-                    temperature=0.2
-                )
-                
-                # Check if tools were used
-                tool_calls = []
-                if "choices" in response and len(response["choices"]) > 0:
-                    choice = response["choices"][0]
-                    if "message" in choice:
-                        # Add assistant response to conversation history
-                        assistant_message = {"role": "assistant"}
-                        assistant_message.update(choice["message"])
-                        messages.append(assistant_message)
-                        
-                        # Extract tool calls
-                        if "tool_calls" in choice["message"]:
-                            tool_calls = choice["message"]["tool_calls"]
-                            total_tool_calls += len(tool_calls)
-                
-                # Determine if step was successful
-                step_success = len(tool_calls) > 0
-                if step_success:
-                    successful_steps += 1
-                
-                # Record step result
-                step_results.append({
-                    "step": i + 1,
-                    "prompt": step_prompt,
-                    "success": step_success,
-                    "tool_calls": len(tool_calls),
-                    "response": response
-                })
-                
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                return {
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id"),
+                    "name": name,
+                    "content": "Error: Invalid arguments JSON"
+                }
+        
+        self.tool_calls_count += 1
+        result = ""
+        
+        try:
+            if name == "list_files":
+                directory = arguments.get("directory", ".")
+                result = self.filesystem_client.list_files(directory)
+            elif name == "read_file":
+                file_path = arguments.get("file_path")
+                if not file_path:
+                    raise ValueError("file_path is required")
+                result = self.filesystem_client.read_file(file_path)
+            elif name == "write_file":
+                file_path = arguments.get("file_path")
+                content = arguments.get("content", "")
+                if not file_path:
+                    raise ValueError("file_path is required")
+                self.filesystem_client.write_file(file_path, content)
+                result = f"File written successfully to {file_path}"
+            elif name == "append_file":
+                file_path = arguments.get("file_path")
+                content = arguments.get("content", "")
+                if not file_path:
+                    raise ValueError("file_path is required")
+                self.filesystem_client.append_file(file_path, content)
+                result = f"Content appended successfully to {file_path}"
+            elif name == "create_directory":
+                directory = arguments.get("directory")
+                if not directory:
+                    raise ValueError("directory is required")
+                self.filesystem_client.create_directory(directory)
+                result = f"Directory created successfully at {directory}"
+            elif name == "copy_file":
+                source = arguments.get("source")
+                destination = arguments.get("destination")
+                if not source or not destination:
+                    raise ValueError("source and destination are required")
+                self.filesystem_client.copy_file(source, destination)
+                result = f"File copied successfully from {source} to {destination}"
+            elif name == "move_file":
+                source = arguments.get("source")
+                destination = arguments.get("destination")
+                if not source or not destination:
+                    raise ValueError("source and destination are required")
+                self.filesystem_client.move_file(source, destination)
+                result = f"File moved successfully from {source} to {destination}"
+            elif name == "search_files":
+                directory = arguments.get("directory", ".")
+                pattern = arguments.get("pattern", "")
+                if not pattern:
+                    raise ValueError("pattern is required")
+                result = self.filesystem_client.search_files(directory, pattern)
+            else:
+                result = f"Unknown tool: {name}"
+        except Exception as e:
+            result = f"Error: {str(e)}"
+        
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call.get("id"),
+            "name": name,
+            "content": result
+        }
+    
+    async def send_message(self, message: str) -> Dict[str, Any]:
+        """Send a message to the model and process the response.
+        
+        Args:
+            message: User message content
+            
+        Returns:
+            Model response
+        """
+        user_message = {"role": "user", "content": message}
+        self.conversation.append(user_message)
+        self.messages.append(user_message)
+        
+        # Prepare request parameters
+        params = ModelRequestParameters(
+            tools=self.get_tools(),
+            tool_choice="auto"
+        )
+        
+        # Construct the request
+        request_data = {
+            "messages": self.conversation,
+            "model": self.model,
+            "response_format": {"type": "json_object"},
+        }
+        
+        # Add tools to request
+        if params.tools:
+            request_data["tools"] = params.tools
+        if params.tool_choice:
+            request_data["tool_choice"] = params.tool_choice
+            
+        # Add provider if specified
+        if self.provider:
+            request_data["transforms"] = [{"type": "provider_filter", "providers": [self.provider]}]
+        
+        # Additional HTTP headers
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": ROUTER_SITE_URL,
+            "X-Title": ROUTER_APP_TITLE
+        }
+        
+        # Send the request and measure latency
+        start_time = time.time()
+        self.send_count += 1
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{ROUTER_BASE_URL}/chat/completions",
+                headers=headers,
+                json=request_data,
+                timeout=120.0
+            )
+        
+        end_time = time.time()
+        latency = (end_time - start_time) * 1000  # Convert to ms
+        self.total_latency += latency
+        
+        # Process the response
+        response_data = response.json()
+        
+        # Extract provider info and update provider attribute if not explicitly set
+        if "provider" in response_data and not self.provider:
+            self.provider = response_data["provider"]
+        
+        # Extract the assistant's message
+        assistant_message = response_data.get("choices", [{}])[0].get("message", {})
+        self.conversation.append(assistant_message)
+        self.messages.append(assistant_message)
+        
+        # Check if the assistant wants to use tools
+        tool_calls = assistant_message.get("tool_calls", [])
+        if tool_calls:
+            # Process each tool call
+            for tool_call in tool_calls:
+                tool_response = await self.process_tool_call(tool_call)
+                self.conversation.append(tool_response)
+                self.messages.append(tool_response)
+        
+        return response_data
+    
+    async def run_test(self, prompt_id: str = "file_operations_sequence") -> TestResults:
+        """Run a specific test sequence.
+        
+        Args:
+            prompt_id: ID of the prompt sequence to run
+            
+        Returns:
+            TestResults dictionary
+        """
+        # Reset conversation for this test
+        self.conversation = []
+        self.messages = []
+        self.tool_calls_count = 0
+        self.send_count = 0
+        self.total_latency = 0
+        
+        # Re-initialize the test environment
+        self.filesystem_client.initialize_test_files()
+        
+        # Load the system prompt
+        system_prompt = await self.load_system_prompt()
+        system_message = {"role": "system", "content": system_prompt}
+        self.conversation.append(system_message)
+        
+        # Load the prompt sequence
+        prompt_sequence = self.filesystem_client.load_prompt_sequence(prompt_id)
+        if not prompt_sequence:
+            return {
+                "model": self.model,
+                "provider": self.provider or "unknown",
+                "prompt_id": prompt_id,
+                "success": False,
+                "total_steps": 0,
+                "successful_steps": 0,
+                "messages": [],
+                "metrics": {
+                    "total_tool_calls": 0,
+                    "total_send_count": 0,
+                    "latency_ms": 0
+                }
+            }
+        
+        logger.info(f"Running test {prompt_id} with {len(prompt_sequence['sequence'])} steps")
+        
+        # Run each step in the sequence
+        successful_steps = 0
+        for i, step in enumerate(prompt_sequence["sequence"]):
+            logger.info(f"Running step {i+1}/{len(prompt_sequence['sequence'])}")
+            try:
+                await self.send_message(step)
+                successful_steps += 1
             except Exception as e:
                 logger.error(f"Error in step {i+1}: {str(e)}")
-                step_results.append({
-                    "step": i + 1,
-                    "prompt": step_prompt,
-                    "success": False,
-                    "error": str(e)
-                })
+                break
         
-        # Overall success is based on percentage of successful steps
-        overall_success = successful_steps / len(sequence) >= 0.6  # At least 60% of steps should succeed
+        # Calculate metrics
+        avg_latency = self.total_latency / self.send_count if self.send_count > 0 else 0
         
-        # Create detailed test result
+        # Save test results
         result = {
-            "provider": self.provider or self.model.split("/")[0],
             "model": self.model,
+            "provider": self.provider or "unknown",
             "prompt_id": prompt_id,
-            "success": overall_success,
-            "total_steps": len(sequence),
+            "success": successful_steps == len(prompt_sequence["sequence"]),
+            "total_steps": len(prompt_sequence["sequence"]),
             "successful_steps": successful_steps,
-            "step_results": step_results,
-            "timestamp": datetime.now().isoformat(),
+            "messages": self.messages,
             "metrics": {
-                "latency_ms": int((datetime.now() - start_time).total_seconds() * 1000),
-                "total_tool_calls": total_tool_calls,
-                "avg_tool_calls_per_step": total_tool_calls / len(sequence) if len(sequence) > 0 else 0
+                "total_tool_calls": self.tool_calls_count,
+                "total_send_count": self.send_count,
+                "latency_ms": avg_latency
             }
         }
         
-        # Add token usage if available from the last response
-        last_response = step_results[-1].get("response", {}) if step_results else {}
-        if "usage" in last_response:
-            result["token_usage"] = last_response["usage"]
+        # Save result to file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        result_dir = Path("results")
+        result_dir.mkdir(exist_ok=True)
         
-        if not overall_success:
-            result["error_message"] = f"Only {successful_steps}/{len(sequence)} steps completed successfully"  
-            result["error_category"] = "incomplete_sequence"
+        provider_suffix = f"_{self.provider}" if self.provider else ""
+        result_file = result_dir / f"{self.model.replace('/', '_')}_{prompt_id}{provider_suffix}_{timestamp}.json"
         
-        return result
-    
-    async def run_all_tests(self) -> List[Dict[str, Any]]:
-        """Run all prompts as tests.
-        
-        Returns:
-            List of test results
-        """
-        prompts = self.filesystem_client.load_prompts()
-        results = []
-        
-        for prompt in prompts:
-            logger.info(f"Running test with prompt {prompt['id']}")
-            result = await self.run_test(prompt["id"])
-            results.append(result)
-        
-        return results
-
-async def main():
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="OpenRouter Provider Validator Test Agent")
-    parser.add_argument("--model", default="anthropic/claude-3.7-sonnet", help="Model to test")
-    parser.add_argument("--provider", help="Provider to route to (optional, overrides auto-detection)")
-    parser.add_argument("--prompt", help="Specific prompt ID to test (optional)")
-    parser.add_argument("--all", action="store_true", help="Run all tests")
-    parser.add_argument("--output", help="Output file for results (optional)")
-    parser.add_argument("--list-providers", action="store_true", help="List available providers for the specified model")
-    args = parser.parse_args()
-    
-    # Special case: just list available providers
-    if args.list_providers:
-        providers = ProviderConfig.find_providers_for_model(args.model, enabled_only=False)
-        if providers:
-            print(f"\nAvailable providers for model '{args.model}':\n")
-            for provider in providers:
-                status = "Enabled" if provider.get("enabled", True) else "Disabled"
-                print(f"  - {provider['name']} (ID: {provider['id']}) - {status}")
-                print(f"    {provider.get('description', '')}\n")
-        else:
-            print(f"\nNo providers found for model '{args.model}'\n")
-        return
-    
-    # Create tester
-    tester = ProviderTester(model=args.model, provider=args.provider)
-    
-    # Run tests
-    if args.prompt:
-        logger.info(f"Running single test with prompt {args.prompt}")
-        result = await tester.run_test(args.prompt)
-        
-        # Save result to specified output file or use default name
-        output_file = args.output or f"result_{args.prompt}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        with open(output_file, "w") as f:
+        with open(result_file, "w") as f:
             json.dump(result, f, indent=2)
         
-        # Print summary
-        provider_info = f" with provider '{result['provider']}'" if result['provider'] else ""
-        print(f"Test completed on model '{result['model']}'{provider_info}: {'Success' if result['success'] else 'Failure'}")
-        print(f"Steps: {result['successful_steps']}/{result['total_steps']} successful")
-        print(f"Tool calls: {result['metrics']['total_tool_calls']}")
-        print(f"Full results saved to {output_file}")
-        
-    elif args.all:
-        logger.info("Running all tests")
-        results = await tester.run_all_tests()
-        
-        # Save results
-        tester.filesystem_client.save_test_results(args.model, results)
-        
-        # Save to specified output file if provided
-        if args.output:
-            with open(args.output, "w") as f:
-                json.dump(results, f, indent=2)
-        
-        # Print summary
-        success_count = sum(1 for r in results if r["success"])
-        step_success_rate = sum(r["successful_steps"] for r in results) / sum(r["total_steps"] for r in results) if results else 0
-        total_tool_calls = sum(r["metrics"]["total_tool_calls"] for r in results)
-        
-        provider_name = results[0]["provider"] if results else "unknown"
-        print(f"Tests completed for model '{args.model}' with provider '{provider_name}':")
-        print(f"  {len(results)} total, {success_count} successful, {len(results) - success_count} failed")
-        print(f"  Overall step success rate: {step_success_rate:.1%}")
-        print(f"  Total tool calls across all tests: {total_tool_calls}")
+        logger.info(f"Test results saved to {result_file}")
+        return result
+
+async def list_providers_for_model(model: str):
+    """List all available providers for a model.
+    
+    Args:
+        model: Model identifier
+    """
+    providers = await ProviderConfig.find_providers_for_model(model, enabled_only=False)
+    
+    print(f"\nAvailable providers for {model}:\n")
+    if not providers:
+        print("No specific providers configured for this model. Default routing will be used.")
     else:
-        print("Please specify --prompt ID to run a single test, --all to run all tests, or --list-providers to see available providers")
-        sys.exit(1)
+        for provider in providers:
+            status = "Enabled" if provider.get("enabled", True) else "Disabled"
+            print(f"Provider: {provider['name']} (ID: {provider['id']}) - {status}")
+            if "endpoint_id" in provider:
+                print(f"  Endpoint ID: {provider['endpoint_id']}")
+            print(f"  {provider.get('description', '')}")
+            
+            if "context_length" in provider:
+                print(f"  Context Length: {provider['context_length']}")
+            if "pricing" in provider and isinstance(provider['pricing'], dict):
+                print(f"  Pricing: Input ${provider['pricing'].get('input', 0):.2f}/1K tokens, "
+                      f"Output ${provider['pricing'].get('output', 0):.2f}/1K tokens")
+            if provider.get("latency_ms") is not None:
+                print(f"  Average Latency: {provider['latency_ms']:.2f}ms")
+            print()
+
+async def main():
+    parser = argparse.ArgumentParser(description="OpenRouter Provider Validator Test Agent")
+    parser.add_argument("--model", default="anthropic/claude-3.7-sonnet", help="Model to test")
+    parser.add_argument("--provider", help="Specific provider to use")
+    parser.add_argument("--prompt", default="file_operations_sequence", help="Prompt sequence ID to test")
+    parser.add_argument("--all", action="store_true", help="Run all prompt sequences")
+    parser.add_argument("--list-providers", action="store_true", help="List available providers for the model")
+    args = parser.parse_args()
+    
+    # Special case: list providers
+    if args.list_providers:
+        await list_providers_for_model(args.model)
+        return
+    
+    tester = ProviderTester(model=args.model, provider=args.provider)
+    
+    # Get provider info to display
+    if args.provider:
+        provider_name = args.provider
+        provider_info = await ProviderConfig.get_provider(args.provider)
+        if provider_info:
+            provider_name = provider_info.get("name", args.provider)
+    elif args.model:
+        # Try to auto-detect provider
+        default_provider_id = await ProviderConfig.get_default_provider_for_model(args.model)
+        if default_provider_id:
+            provider_info = await ProviderConfig.get_provider(default_provider_id)
+            provider_name = provider_info.get("name", default_provider_id) if provider_info else default_provider_id
+            print(f"Using auto-detected provider: {provider_name} (ID: {default_provider_id})")
+        else:
+            provider_name = "OpenRouter (default routing)"
+            print("No specific provider detected, using default routing")
+    else:
+        provider_name = "OpenRouter (default routing)"
+    
+    print(f"Testing {args.model} using {provider_name}")
+    
+    if args.all:
+        # Run all prompt sequences
+        filesystem_client = FileSystemClient()
+        prompts = filesystem_client.load_prompts()
+        for prompt in prompts:
+            print(f"\nRunning test: {prompt['id']}")
+            await tester.run_test(prompt["id"])
+    else:
+        # Run specified prompt sequence
+        await tester.run_test(args.prompt)
 
 if __name__ == "__main__":
     asyncio.run(main())

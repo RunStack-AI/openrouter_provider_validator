@@ -13,7 +13,7 @@ This project helps you assess the reliability and performance of different OpenR
 - Automatically set up toy filesystem for testing
 - Track success rates and tool usage metrics
 - Generate comparative reports across models
-- Auto-detect and use appropriate providers for specific models
+- **Auto-detect available providers for specific models via API**
 - Test the same model across multiple providers automatically
 - Save detailed test results for analysis
 
@@ -23,11 +23,11 @@ The system consists of these core components:
 
 1. **Filesystem Client** (`client.py`) - Manages data storage and retrieval
 2. **MCP Server** (`mcp_server.py`) - Exposes filesystem operations as tools
-3. **Provider Config** (`provider_config.py`) - Manages provider configurations and model routing
-4. **Test Agent** (`agent.py`) - Executes prompt sequences and interacts with OpenRouter
-5. **Test Runner** (`test_runner.py`) - Orchestrates automated test execution
-6. **Prompt Definitions** (`data/prompts.json`) - Defines test scenarios with prompt sequences
-7. **Provider Definitions** (`data/providers.json`) - Configures available providers and their supported models
+3. **OpenRouter Client** (`openrouter_client.py`) - Fetches model and provider information from API
+4. **Provider Config** (`provider_config.py`) - Manages provider configurations and model routing
+5. **Test Agent** (`agent.py`) - Executes prompt sequences and interacts with OpenRouter
+6. **Test Runner** (`test_runner.py`) - Orchestrates automated test execution
+7. **Prompt Definitions** (`data/prompts.json`) - Defines test scenarios with prompt sequences
 
 ## Test Methodology
 
@@ -84,7 +84,7 @@ python agent.py --model anthropic/claude-3.7-sonnet --prompt file_operations_seq
 Test with a specific provider for a model (overriding auto-detection):
 
 ```bash
-python agent.py --model moonshot/kimi-k2 --provider deepinfra --prompt file_operations_sequence
+python agent.py --model moonshot/kimi-k2 --provider fireworks --prompt file_operations_sequence
 ```
 
 ### Running All Tests
@@ -103,7 +103,7 @@ Test a model with all its enabled providers automatically:
 python test_runner.py --models moonshot/kimi-k2 --all-providers
 ```
 
-This will automatically run all tests for each enabled provider configured for the moonshot/kimi-k2 model, generating a comprehensive comparison report.
+This will automatically run all tests for each provider configured for the moonshot/kimi-k2 model, generating a comprehensive comparison report.
 
 ### Automated Testing Across Models
 
@@ -121,19 +121,13 @@ python test_runner.py --models moonshot/kimi-k2 anthropic/claude-3.7-sonnet --pr
 
 ## Provider Configuration
 
-Providers are configured in `data/providers.json` with the following structure:
+The system automatically discovers providers for models directly from the OpenRouter API using the `/model/{model_id}/endpoints` endpoint. This ensures that:
 
-```json
-{
-  "id": "provider_id",
-  "name": "Provider Display Name",
-  "enabled": true,
-  "supported_models": ["model/id1", "model/id2"],
-  "description": "Description of the provider"
-}
-```
+1. You always have the most up-to-date provider information
+2. You can see accurate pricing and latency metrics 
+3. You only test with providers that actually support the tools feature
 
-The system automatically matches models to appropriate providers based on the `supported_models` field. This allows testing different provider implementations of the same model (e.g., multiple providers for Moonshot/Kimi-K2).
+The API-based approach means you don't need to maintain manual provider configurations in most cases. However, for backward compatibility and fallback purposes, the system also supports loading provider configurations from `data/providers.json`.
 
 ## Prompt Sequences
 
@@ -172,14 +166,14 @@ A summary report is generated with comparative statistics across models and prov
 
 ## Extending the System
 
-### Adding New Models and Providers
+### Adding Custom Provider Configurations
 
-Add new provider configurations to `data/providers.json` to test additional models:
+While the system can automatically detect providers from the OpenRouter API, you can add custom provider configurations to `data/providers.json` to override or supplement the API data:
 
 ```json
 {
-  "id": "new_provider_id",
-  "name": "New Provider Name (via OpenRouter)",
+  "id": "custom_provider_id",
+  "name": "Custom Provider Name (via OpenRouter)",
   "enabled": true,
   "supported_models": [
     "vendorid/modelname"
@@ -187,6 +181,8 @@ Add new provider configurations to `data/providers.json` to test additional mode
   "description": "Description of the provider and model"
 }
 ```
+
+You can also disable specific providers by setting `"enabled": false` in their configuration.
 
 ### Adding New Prompt Sequences
 

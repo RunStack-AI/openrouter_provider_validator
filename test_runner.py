@@ -70,8 +70,8 @@ async def run_tests(
         combined_results[model] = {}
         
         if test_all_providers:
-            # Get all enabled providers for this model
-            model_providers = ProviderConfig.find_providers_for_model(model, enabled_only=True)
+            # Get all enabled providers for this model via API
+            model_providers = await ProviderConfig.find_providers_for_model(model, enabled_only=True)
             if not model_providers:
                 logger.warning(f"No enabled providers found for model {model}, using default routing")
                 model_providers = [{"id": None, "name": "Default Routing"}]
@@ -83,14 +83,19 @@ async def run_tests(
                 logger.info(f"Using specified provider: {provider_id}")
             else:
                 # Check if we can auto-detect a provider
-                provider_id = ProviderConfig.get_default_provider_for_model(model)
+                provider_id = await ProviderConfig.get_default_provider_for_model(model)
                 if provider_id:
                     logger.info(f"Auto-detected provider: {provider_id}")
                 else:
                     logger.info(f"No specific provider found for model {model}, using default routing")
                     
             provider_name = "Default Routing"
-            provider_config = ProviderConfig.get_provider(provider_id) if provider_id else None
+            provider_config = None
+            try:
+                provider_config = await ProviderConfig.get_provider(provider_id) if provider_id else None
+            except Exception as e:
+                logger.warning(f"Error getting provider config: {e}")
+                
             if provider_config:
                 provider_name = provider_config.get("name", provider_id)
                 
@@ -231,7 +236,7 @@ async def main():
         
         print("\nAvailable providers by model:\n")
         for model in models:
-            providers = ProviderConfig.find_providers_for_model(model, enabled_only=False)
+            providers = await ProviderConfig.find_providers_for_model(model, enabled_only=False)
             print(f"Model: {model}")
             if providers:
                 for provider in providers:
