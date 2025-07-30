@@ -10,13 +10,21 @@ import asyncio
 import json
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, TypedDict
 
 import httpx
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+
+# Import PydanticAI components for Agent framework
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.mcp import MCPServerStdio
+from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.messages import ModelMessage, SystemPromptPart, UserPromptPart, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.agent import AgentRunResult
 
 from client import FileSystemClient
 from filesystem_test_helper import FileSystemTestHelper
@@ -40,18 +48,15 @@ import logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("validator")
 
-class ModelRequestParameters(BaseModel):
-    """Parameters for a model request."""
-    tools: Optional[List[Dict[str, Any]]] = Field(None, description="List of tools to make available")
-    tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(None, description="Tool choice strategy")
-
-class ChatMessage(BaseModel):
-    """A single message in a chat conversation."""
-    role: str = Field(..., description="Role of the message sender: system, user, assistant or tool")
-    content: Optional[str] = Field(None, description="Content of the message")
-    name: Optional[str] = Field(None, description="Name of the tool")
-    tool_calls: Optional[List[Dict[str, Any]]] = Field(None, description="Tool calls made by the assistant")
-    tool_call_id: Optional[str] = Field(None, description="ID of the tool call this message is responding to")
+# Try to import logfire for metrics if available
+try:
+    import logfire
+    logfire.configure(token=os.getenv("LOGFIRE_API_KEY"))
+    logfire.instrument_openai()
+    LOGFIRE_AVAILABLE = True
+except ImportError:
+    LOGFIRE_AVAILABLE = False
+    logger.warning("logfire not installed, skipping instrumentation")
 
 class TestResults(TypedDict, total=False):
     """Results of a test run."""
@@ -79,11 +84,36 @@ class ProviderTester:
         self.test_helper = FileSystemTestHelper()
         self.test_helper.initialize_test_files()
         
+        # Message history tracking
         self.messages = []
         self.conversation = []
+        
+        # Metrics
         self.tool_calls_count = 0
         self.send_count = 0
         self.total_latency = 0
+        
+        # Set up OpenRouter based model
+        self.openai_model = OpenAIModel(
+            model, 
+            provider=OpenAIProvider(
+                base_url=ROUTER_BASE_URL,
+                api_key=api_key,
+                default_headers={
+                    "HTTP-Referer": ROUTER_SITE_URL,
+                    "X-Title": ROUTER_APP_TITLE
+                }
+            ),
+        )
+        
+        # Set up MCP Server environment variables
+        self.mcp_env = {
+            # Add any environment variables needed by the MCP server
+        }
+        
+        # We'll initialize the actual server in the run_test method
+        self.mcp_servers = None
+        self.agent = None
         
     async def load_system_prompt(self) -> str:
         """Load the system prompt for the agent.
@@ -110,344 +140,124 @@ class ProviderTester:
             with open(system_prompt_file, "r") as f:
                 system_prompt = f.read()
                 
+        # Replace any time variables
+        time_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        system_prompt = system_prompt.replace('{time_now}', time_now)
+                
         return system_prompt
     
-    def get_tools(self) -> List[Dict[str, Any]]:
-        """Get the tool definitions for the model.
-        
-        Returns:
-            List of tool definitions
-        """
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": "list_files",
-                    "description": "List files in a directory",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "directory": {
-                                "type": "string",
-                                "description": "Directory to list files from"
-                            }
-                        },
-                        "required": ["directory"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "read_file",
-                    "description": "Read content from a file",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "file_path": {
-                                "type": "string",
-                                "description": "Path to the file to read"
-                            }
-                        },
-                        "required": ["file_path"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "write_file",
-                    "description": "Write content to a file",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "file_path": {
-                                "type": "string",
-                                "description": "Path to the file to write to"
-                            },
-                            "content": {
-                                "type": "string",
-                                "description": "Content to write to the file"
-                            }
-                        },
-                        "required": ["file_path", "content"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "append_file",
-                    "description": "Append content to a file",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "file_path": {
-                                "type": "string",
-                                "description": "Path to the file to append to"
-                            },
-                            "content": {
-                                "type": "string",
-                                "description": "Content to append to the file"
-                            }
-                        },
-                        "required": ["file_path", "content"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "create_directory",
-                    "description": "Create a new directory",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "directory": {
-                                "type": "string",
-                                "description": "Path of the directory to create"
-                            }
-                        },
-                        "required": ["directory"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "copy_file",
-                    "description": "Copy a file to a new location",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "source": {
-                                "type": "string",
-                                "description": "Source file path"
-                            },
-                            "destination": {
-                                "type": "string",
-                                "description": "Destination file path"
-                            }
-                        },
-                        "required": ["source", "destination"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "move_file",
-                    "description": "Move a file to a new location",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "source": {
-                                "type": "string",
-                                "description": "Source file path"
-                            },
-                            "destination": {
-                                "type": "string",
-                                "description": "Destination file path"
-                            }
-                        },
-                        "required": ["source", "destination"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "search_files",
-                    "description": "Search for content in files",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "directory": {
-                                "type": "string",
-                                "description": "Directory to search in"
-                            },
-                            "pattern": {
-                                "type": "string",
-                                "description": "Pattern to search for"
-                            }
-                        },
-                        "required": ["directory", "pattern"]
-                    }
-                }
-            }
-        ]
-    
-    async def process_tool_call(self, tool_call: Dict[str, Any]) -> Dict[str, Any]:
-        """Process a tool call and return the result.
+    def initialize_agent(self, system_prompt):
+        """Initialize the Agent with MCP server.
         
         Args:
-            tool_call: Tool call from the assistant
+            system_prompt: System prompt for the agent
+        """
+        # Set up the MCP server for tools
+        self.mcp_servers = [
+            MCPServerStdio('python', ['./mcp_server.py'], env=self.mcp_env)
+        ]
+        
+        # If provider is specified, add it to the transforms
+        provider_transforms = None
+        if self.provider:
+            provider_transforms = [{"type": "provider_filter", "providers": [self.provider]}]
+            # Add this to the model config
+            self.openai_model.default_options["transforms"] = provider_transforms
+            
+        # Create the agent
+        self.agent = Agent(self.openai_model, mcp_servers=self.mcp_servers, system_prompt=system_prompt)
+        
+    # Function to filter message history for the agent
+    def filtered_message_history(self, result: Optional[AgentRunResult], limit: Optional[int] = None):
+        """Filter and limit the message history from an AgentRunResult.
+        
+        Args:
+            result: The AgentRunResult object with message history
+            limit: Optional int, if provided returns only system message + last N messages
             
         Returns:
-            Tool response message
+            Filtered list of messages in the format expected by the agent
         """
-        function = tool_call.get("function", {})
-        name = function.get("name")
-        arguments = function.get("arguments", "{}")
+        if result is None:
+            return None
+            
+        # Get all messages
+        messages = result.all_messages()
         
-        # Ensure arguments is a dictionary
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments)
-            except json.JSONDecodeError:
-                return {
-                    "role": "tool",
-                    "tool_call_id": tool_call.get("id"),
-                    "name": name,
-                    "content": "Error: Invalid arguments JSON"
-                }
+        # Extract system message
+        system_message = next((msg for msg in messages if type(msg.parts[0]) == SystemPromptPart), None)
         
-        self.tool_calls_count += 1
-        result = ""
+        # Filter non-system messages
+        non_system_messages = [msg for msg in messages if type(msg.parts[0]) != SystemPromptPart]
         
-        try:
-            if name == "list_files":
-                directory = arguments.get("directory", ".")
-                result = self.test_helper.list_files(directory)
-            elif name == "read_file":
-                file_path = arguments.get("file_path")
-                if not file_path:
-                    raise ValueError("file_path is required")
-                result = self.test_helper.read_file(file_path)
-            elif name == "write_file":
-                file_path = arguments.get("file_path")
-                content = arguments.get("content", "")
-                if not file_path:
-                    raise ValueError("file_path is required")
-                self.test_helper.write_file(file_path, content)
-                result = f"File written successfully to {file_path}"
-            elif name == "append_file":
-                file_path = arguments.get("file_path")
-                content = arguments.get("content", "")
-                if not file_path:
-                    raise ValueError("file_path is required")
-                self.test_helper.append_file(file_path, content)
-                result = f"Content appended successfully to {file_path}"
-            elif name == "create_directory":
-                directory = arguments.get("directory")
-                if not directory:
-                    raise ValueError("directory is required")
-                self.test_helper.create_directory(directory)
-                result = f"Directory created successfully at {directory}"
-            elif name == "copy_file":
-                source = arguments.get("source")
-                destination = arguments.get("destination")
-                if not source or not destination:
-                    raise ValueError("source and destination are required")
-                self.test_helper.copy_file(source, destination)
-                result = f"File copied successfully from {source} to {destination}"
-            elif name == "move_file":
-                source = arguments.get("source")
-                destination = arguments.get("destination")
-                if not source or not destination:
-                    raise ValueError("source and destination are required")
-                self.test_helper.move_file(source, destination)
-                result = f"File moved successfully from {source} to {destination}"
-            elif name == "search_files":
-                directory = arguments.get("directory", ".")
-                pattern = arguments.get("pattern", "")
-                if not pattern:
-                    raise ValueError("pattern is required")
-                result = self.test_helper.search_files(directory, pattern)
-            else:
-                result = f"Unknown tool: {name}"
-        except Exception as e:
-            result = f"Error: {str(e)}"
+        # Apply limit if specified
+        if limit is not None and limit > 0 and len(non_system_messages) > limit:
+            non_system_messages = non_system_messages[-limit:]
         
-        return {
-            "role": "tool",
-            "tool_call_id": tool_call.get("id"),
-            "name": name,
-            "content": result
-        }
+        # Combine system message with other messages
+        result_messages = []
+        if system_message:
+            result_messages.append(system_message)
+        result_messages.extend(non_system_messages)
+        
+        return result_messages
     
-    async def send_message(self, message: str) -> Dict[str, Any]:
-        """Send a message to the model and process the response.
+    async def send_message(self, message: str, result: Optional[AgentRunResult] = None) -> Dict[str, Any]:
+        """Send a message to the agent and process the response.
         
         Args:
             message: User message content
+            result: Previous AgentRunResult for conversation history
             
         Returns:
-            Model response
+            Response data including messages and metrics
         """
-        user_message = {"role": "user", "content": message}
-        self.conversation.append(user_message)
-        self.messages.append(user_message)
-        
-        # Prepare request parameters
-        params = ModelRequestParameters(
-            tools=self.get_tools(),
-            tool_choice="auto"
-        )
-        
-        # Construct the request
-        request_data = {
-            "messages": self.conversation,
-            "model": self.model,
-            "response_format": {"type": "json_object"},
-        }
-        
-        # Add tools to request
-        if params.tools:
-            request_data["tools"] = params.tools
-        if params.tool_choice:
-            request_data["tool_choice"] = params.tool_choice
-            
-        # Add provider if specified
-        if self.provider:
-            request_data["transforms"] = [{"type": "provider_filter", "providers": [self.provider]}]
-        
-        # Additional HTTP headers
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": ROUTER_SITE_URL,
-            "X-Title": ROUTER_APP_TITLE
-        }
-        
-        # Send the request and measure latency
         start_time = time.time()
         self.send_count += 1
         
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{ROUTER_BASE_URL}/chat/completions",
-                headers=headers,
-                json=request_data,
-                timeout=120.0
+        # Run the agent
+        try:
+            agent_result = await self.agent.run(
+                message,
+                message_history=self.filtered_message_history(result, limit=24)
             )
-        
-        end_time = time.time()
-        latency = (end_time - start_time) * 1000  # Convert to ms
-        self.total_latency += latency
-        
-        # Process the response
-        response_data = response.json()
-        
-        # Extract provider info and update provider attribute if not explicitly set
-        if "provider" in response_data and not self.provider:
-            self.provider = response_data["provider"]
-        
-        # Extract the assistant's message
-        assistant_message = response_data.get("choices", [{}])[0].get("message", {})
-        self.conversation.append(assistant_message)
-        self.messages.append(assistant_message)
-        
-        # Check if the assistant wants to use tools
-        tool_calls = assistant_message.get("tool_calls", [])
-        if tool_calls:
-            # Process each tool call
-            for tool_call in tool_calls:
-                tool_response = await self.process_tool_call(tool_call)
-                self.conversation.append(tool_response)
-                self.messages.append(tool_response)
-        
-        return response_data
+            
+            # Extract all messages including tool calls
+            all_messages = agent_result.all_messages()
+            
+            # Count tool calls
+            for msg in all_messages:
+                for part in msg.parts:
+                    if isinstance(part, ToolCallPart):
+                        self.tool_calls_count += 1
+            
+            # Add to conversation history
+            self.messages.extend(all_messages)
+            
+            # Calculate latency
+            end_time = time.time()
+            latency = (end_time - start_time) * 1000  # Convert to ms
+            self.total_latency += latency
+            
+            # Extract provider info from response if available
+            response_json = agent_result.raw_responses[-1] if agent_result.raw_responses else {}
+            if isinstance(response_json, dict) and "provider" in response_json and not self.provider:
+                self.provider = response_json.get("provider")
+            
+            return {
+                "result": agent_result,
+                "output": agent_result.output,
+                "messages": all_messages,
+                "latency_ms": latency
+            }
+            
+        except Exception as e:
+            logger.error(f"Error running agent: {str(e)}")
+            return {
+                "error": str(e),
+                "messages": [],
+                "latency_ms": 0
+            }
     
     async def run_test(self, prompt_id: str = "file_operations_sequence") -> TestResults:
         """Run a specific test sequence.
@@ -470,8 +280,9 @@ class ProviderTester:
         
         # Load the system prompt
         system_prompt = await self.load_system_prompt()
-        system_message = {"role": "system", "content": system_prompt}
-        self.conversation.append(system_message)
+        
+        # Initialize agent with system prompt
+        self.initialize_agent(system_prompt)
         
         # Load the prompt sequence
         prompt_sequence = self.test_helper.load_prompt_sequence(prompt_id)
@@ -493,19 +304,44 @@ class ProviderTester:
         
         logger.info(f"Running test {prompt_id} with {len(prompt_sequence['sequence'])} steps")
         
-        # Run each step in the sequence
+        # Run each step in the sequence through the agent
         successful_steps = 0
-        for i, step in enumerate(prompt_sequence["sequence"]):
-            logger.info(f"Running step {i+1}/{len(prompt_sequence['sequence'])}")
-            try:
-                await self.send_message(step)
-                successful_steps += 1
-            except Exception as e:
-                logger.error(f"Error in step {i+1}: {str(e)}")
-                break
+        previous_result = None
+        
+        # Start the MCP servers
+        async with self.agent.run_mcp_servers():
+            for i, step in enumerate(prompt_sequence["sequence"]):
+                logger.info(f"Running step {i+1}/{len(prompt_sequence['sequence'])}")
+                try:
+                    response = await self.send_message(step, previous_result)
+                    if "error" in response:
+                        logger.error(f"Error in step {i+1}: {response['error']}")
+                        break
+                    
+                    previous_result = response.get("result")
+                    successful_steps += 1
+                except Exception as e:
+                    logger.error(f"Error in step {i+1}: {str(e)}")
+                    break
         
         # Calculate metrics
         avg_latency = self.total_latency / self.send_count if self.send_count > 0 else 0
+        
+        # Extract messages in serializable format
+        serialized_messages = []
+        for msg in self.messages:
+            if hasattr(msg, 'dict'):
+                serialized_messages.append(msg.dict())
+            elif hasattr(msg, 'model_dump'):
+                serialized_messages.append(msg.model_dump())
+            else:
+                # Attempt to serialize based on role/content pattern
+                serialized_msg = {}
+                if hasattr(msg, 'role'):
+                    serialized_msg['role'] = msg.role
+                if hasattr(msg, 'content'):
+                    serialized_msg['content'] = msg.content
+                serialized_messages.append(serialized_msg)
         
         # Save test results
         result = {
@@ -515,7 +351,7 @@ class ProviderTester:
             "success": successful_steps == len(prompt_sequence["sequence"]),
             "total_steps": len(prompt_sequence["sequence"]),
             "successful_steps": successful_steps,
-            "messages": self.messages,
+            "messages": serialized_messages,
             "metrics": {
                 "total_tool_calls": self.tool_calls_count,
                 "total_send_count": self.send_count,
