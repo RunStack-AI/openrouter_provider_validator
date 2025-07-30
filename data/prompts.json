@@ -1,0 +1,23 @@
+[
+  {
+    "id": "tool_basic",
+    "name": "Basic Tool Use",
+    "prompt": "List all available providers and summarize how many are enabled and disabled.",
+    "category": "tool_use",
+    "expected_tools": ["list_providers", "get_stats"]
+  },
+  {
+    "id": "tool_chain",
+    "name": "Tool Chain",
+    "prompt": "Create a new test prompt with ID 'code_review' that asks the model to review and optimize a Python function. Then list all prompts to confirm it was added.",
+    "category": "tool_use",
+    "expected_tools": ["save_prompt", "list_prompts"]
+  },
+  {
+    "id": "tool_complex",
+    "name": "Complex Decision Making",
+    "prompt": "Analyze the test results for the model 'anthropic/claude-3.7-sonnet' and generate a summary of the error patterns. If there are no results yet, create a brief report explaining what we would look for in the analysis.",
+    "category": "reasoning",
+    "expected_tools": ["load_test_results", "generate_provider_summary", "save_report"]
+  }
+]

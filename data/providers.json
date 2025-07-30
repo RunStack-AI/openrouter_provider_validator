@@ -1,0 +1,26 @@
+[
+  {
+    "name": "anthropic",
+    "model": "anthropic/claude-3.7-sonnet",
+    "description": "Claude 3.7 Sonnet via Anthropic",
+    "enabled": true
+  },
+  {
+    "name": "openai",
+    "model": "openai/gpt-4o",
+    "description": "GPT-4o via OpenAI",
+    "enabled": true
+  },
+  {
+    "name": "meta",
+    "model": "meta/llama-3-70b-instruct",
+    "description": "Llama 3 70B by Meta",
+    "enabled": true
+  },
+  {
+    "name": "google",
+    "model": "google/gemini-1.5-pro",
+    "description": "Gemini 1.5 Pro by Google",
+    "enabled": false
+  }
+]
