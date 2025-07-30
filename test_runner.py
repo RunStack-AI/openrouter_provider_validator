@@ -8,7 +8,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 
 from agent import ProviderTester
 from filesystem_test_helper import FileSystemTestHelper
@@ -28,6 +28,68 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("test_runner")
+
+
+def get_provider_id(provider_config: Union[Dict, str, None]) -> Optional[str]:
+    """
+    Extract the provider ID from a provider configuration.
+    Returns None for default routing.
+    
+    Args:
+        provider_config: Provider configuration dict or direct ID string
+        
+    Returns:
+        Provider ID string or None
+    """
+    if provider_config is None or provider_config == "":
+        return None
+    if isinstance(provider_config, dict) and "id" in provider_config:
+        return provider_config["id"]
+    return provider_config  # If it's already an ID
+
+
+def generate_result_filename(model: str, prompt_id: str, provider_id: Optional[str] = None, timestamp: Optional[str] = None) -> str:
+    """
+    Generate a consistent result filename with timestamp.
+    
+    Args:
+        model: Model identifier
+        prompt_id: Prompt sequence identifier
+        provider_id: Provider ID (optional)
+        timestamp: Timestamp string (optional)
+        
+    Returns:
+        Formatted filename string
+    """
+    timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+    provider_suffix = f"_{provider_id}" if provider_id else ""
+    return f"{model.replace('/', '_')}_{prompt_id}{provider_suffix}_{timestamp}.json"
+
+
+async def get_provider_display_name(provider_id: Optional[str], results: Optional[List[Dict]] = None) -> str:
+    """
+    Get a user-friendly provider name.
+    Try to get from results first, then provider config, then ID.
+    
+    Args:
+        provider_id: Provider ID
+        results: Optional list of test results
+        
+    Returns:
+        User-friendly provider name
+    """
+    if results and len(results) > 0 and "provider" in results[0]:
+        return results[0]["provider"]
+        
+    try:
+        provider_config = await ProviderConfig.get_provider(provider_id) if provider_id else None
+        if provider_config and "name" in provider_config:
+            return provider_config["name"]
+    except Exception:
+        pass
+        
+    return provider_id or "Default Routing"
+
 
 async def run_tests(
     models: Optional[List[str]] = None,
@@ -89,27 +151,23 @@ async def run_tests(
                 else:
                     logger.info(f"No specific provider found for model {model}, using default routing")
                     
-            provider_name = "Default Routing"
-            provider_config = None
-            try:
-                provider_config = await ProviderConfig.get_provider(provider_id) if provider_id else None
-            except Exception as e:
-                logger.warning(f"Error getting provider config: {e}")
-                
-            if provider_config:
-                provider_name = provider_config.get("name", provider_id)
-                
+            provider_name = await get_provider_display_name(provider_id)
             model_providers = [{"id": provider_id, "name": provider_name}]
         
         logger.info(f"Running tests for model {model} with {len(model_providers)} provider(s)")
         
+        # Generate a timestamp for this batch of tests
+        batch_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
         # Run tests for each provider of this model
         for provider_config in model_providers:
-            provider_id = provider_config.get("id")
-            provider_name = provider_config.get("name", provider_id if provider_id else "Default Routing")
+            # Ensure we're getting a clean provider ID
+            provider_id = get_provider_id(provider_config)
+            provider_name = provider_config.get("name", await get_provider_display_name(provider_id))
             
             logger.info(f"Running tests with provider: {provider_name}")
             
+            # Initialize tester with the provider ID (string or None)
             provider_results = []
             tester = ProviderTester(model=model, provider=provider_id)
             
@@ -118,14 +176,19 @@ async def run_tests(
                 result = await tester.run_test(prompt["id"])
                 provider_results.append(result)
                 
-                # Save individual result
-                provider_suffix = f"_{provider_id}" if provider_id else ""
-                result_file = os.path.join(output_dir, f"{model.replace('/', '_')}_{prompt['id']}{provider_suffix}.json")
+                # Save individual result with timestamp to prevent overwriting
+                result_file = os.path.join(
+                    output_dir, 
+                    generate_result_filename(model, prompt['id'], provider_id, batch_timestamp)
+                )
                 with open(result_file, "w") as f:
                     json.dump(result, f, indent=2)
             
             # Save results for this provider
-            combined_results[model][provider_id or "default"] = provider_results
+            result_key = "default"
+            if provider_id is not None and provider_id != "":
+                result_key = provider_id
+            combined_results[model][result_key] = provider_results
     
     # Save combined results
     combined_results_file = os.path.join(output_dir, f"combined_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
@@ -142,6 +205,7 @@ async def run_tests(
     logger.info(f"Summary report: {report_file}")
     
     return combined_results
+
 
 def generate_summary_report(results):
     """Generate a markdown summary report from test results.
@@ -162,7 +226,7 @@ def generate_summary_report(results):
     for model_results in results.values():
         for provider_results in model_results.values():
             total_tests += len(provider_results)
-            total_successful += sum(1 for r in provider_results if r["success"])
+            total_successful += sum(1 for r in provider_results if r.get("success", False))
     
     overall_success_rate = total_successful / total_tests if total_tests > 0 else 0
     
@@ -187,12 +251,22 @@ def generate_summary_report(results):
             provider_name = provider_results[0].get("provider", provider_id) if provider_results else provider_id
             
             # Calculate statistics
-            successful = sum(1 for r in provider_results if r["success"])
+            successful = sum(1 for r in provider_results if r.get("success", False))
             success_rate = successful / len(provider_results) if provider_results else 0
             
-            avg_tool_calls = sum(r["metrics"]["total_tool_calls"] for r in provider_results) / len(provider_results) if provider_results else 0
-            avg_steps = sum(r["successful_steps"] / r["total_steps"] for r in provider_results) / len(provider_results) if provider_results else 0
-            avg_latency = sum(r["metrics"]["latency_ms"] for r in provider_results) / len(provider_results) if provider_results else 0
+            # Use defensive accessor pattern for metrics
+            avg_tool_calls = sum(r.get("metrics", {}).get("total_tool_calls", 0) for r in provider_results) / len(provider_results) if provider_results else 0
+            
+            # Handle the case where total_steps might be 0
+            avg_steps_values = []
+            for r in provider_results:
+                total_steps = r.get("total_steps", 0)
+                successful_steps = r.get("successful_steps", 0) 
+                if total_steps > 0:
+                    avg_steps_values.append(successful_steps / total_steps)
+            
+            avg_steps = sum(avg_steps_values) / len(avg_steps_values) if avg_steps_values else 0
+            avg_latency = sum(r.get("metrics", {}).get("latency_ms", 0) for r in provider_results) / len(provider_results) if provider_results else 0
             
             report.append(f"| {provider_name} | {len(provider_results)} | {success_rate:.1%} | {avg_tool_calls:.1f} | {avg_steps:.1%} | {avg_latency:.0f}ms |")
         
@@ -210,11 +284,20 @@ def generate_summary_report(results):
             report.append("| ------ | ------- | ----- | ---------- | ------- |")
             
             for r in provider_results:
-                report.append(f"| {r['prompt_id']} | {'✓' if r['success'] else '✗'} | {r['successful_steps']}/{r['total_steps']} | {r['metrics']['total_tool_calls']} | {r['metrics']['latency_ms']}ms |")
+                # Handle potential missing keys with defaults
+                success = "✓" if r.get("success", False) else "✗"
+                successful_steps = r.get("successful_steps", 0)
+                total_steps = r.get("total_steps", 0)
+                tool_calls = r.get("metrics", {}).get("total_tool_calls", 0)
+                latency = r.get("metrics", {}).get("latency_ms", 0)
+                prompt_id = r.get("prompt_id", "unknown")
+                
+                report.append(f"| {prompt_id} | {success} | {successful_steps}/{total_steps} | {tool_calls} | {latency}ms |")
             
             report.append("\n")
     
     return "\n".join(report)
+
 
 async def main():
     parser = argparse.ArgumentParser(description="Run automated tests with OpenRouter Provider Validator")
@@ -264,6 +347,7 @@ async def main():
         output_dir=args.output_dir,
         test_all_providers=args.all_providers
     )
+
 
 if __name__ == "__main__":
     asyncio.run(main())
