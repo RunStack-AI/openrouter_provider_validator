@@ -9,6 +9,8 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Union
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from agent import ProviderTester
 from filesystem_test_helper import FileSystemTestHelper
