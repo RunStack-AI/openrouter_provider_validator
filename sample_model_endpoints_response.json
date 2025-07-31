@@ -1,0 +1,322 @@
+{
+    "data": {
+        "id": "moonshotai/kimi-k2",
+        "name": "MoonshotAI: Kimi K2",
+        "created": 1752263252,
+        "description": "Kimi K2 Instruct is a large-scale Mixture-of-Experts (MoE) language model developed by Moonshot AI, featuring 1 trillion total parameters with 32 billion active per forward pass. It is optimized for agentic capabilities, including advanced tool use, reasoning, and code synthesis. Kimi K2 excels across a broad range of benchmarks, particularly in coding (LiveCodeBench, SWE-bench), reasoning (ZebraLogic, GPQA), and tool-use (Tau2, AceBench) tasks. It supports long-context inference up to 128K tokens and is designed with a novel training stack that includes the MuonClip optimizer for stable large-scale MoE training.",
+        "architecture": {
+            "tokenizer": "Other",
+            "instruct_type": null,
+            "modality": "text->text",
+            "input_modalities": [
+                "text"],
+            "output_modalities": [
+                "text"]
+        },
+        "endpoints": [{
+            "name": "Chutes | moonshotai/kimi-k2",
+            "context_length": 32768,
+            "pricing": {
+                "prompt": "0.0000000878",
+                "completion": "0.0000000878",
+                "request": "0",
+                "image": "0",
+                "audio": "0",
+                "web_search": "0",
+                "internal_reasoning": "0",
+                "discount": 0
+            },
+            "provider_name": "Chutes",
+            "tag": "chutes/fp8",
+            "quantization": "fp8",
+            "max_completion_tokens": null,
+            "max_prompt_tokens": null,
+            "supported_parameters": [
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "stop",
+                "frequency_penalty",
+                "presence_penalty",
+                "seed",
+                "top_k",
+                "min_p",
+                "repetition_penalty",
+                "logprobs",
+                "logit_bias",
+                "top_logprobs"
+            ],
+            "status": -2,
+            "uptime_last_30m": 92.36172080772607
+        }, {
+            "name": "Targon | moonshotai/kimi-k2",
+            "context_length": 63000,
+            "pricing": {
+                "prompt": "0.00000014",
+                "completion": "0.00000249",
+                "request": "0",
+                "image": "0",
+                "audio": "0",
+                "web_search": "0",
+                "internal_reasoning": "0",
+                "discount": 0
+            },
+            "provider_name": "Targon",
+            "tag": "targon/fp8",
+            "quantization": "fp8",
+            "max_completion_tokens": 63000,
+            "max_prompt_tokens": null,
+            "supported_parameters": [
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "stop",
+                "frequency_penalty",
+                "presence_penalty",
+                "seed",
+                "top_k",
+                "repetition_penalty"
+            ],
+            "status": 0,
+            "uptime_last_30m": 99.69879518072288
+        }, {
+            "name": "DeepInfra | moonshotai/kimi-k2",
+            "context_length": 131000,
+            "pricing": {
+                "prompt": "0.00000055",
+                "completion": "0.0000022",
+                "request": "0",
+                "image": "0",
+                "audio": "0",
+                "web_search": "0",
+                "internal_reasoning": "0",
+                "discount": 0
+            },
+            "provider_name": "DeepInfra",
+            "tag": "deepinfra/fp4",
+            "quantization": "fp4",
+            "max_completion_tokens": null,
+            "max_prompt_tokens": null,
+            "supported_parameters": [
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "stop",
+                "frequency_penalty",
+                "presence_penalty",
+                "repetition_penalty",
+                "response_format",
+                "top_k",
+                "seed",
+                "min_p"
+            ],
+            "status": 0,
+            "uptime_last_30m": 100
+        }, {
+            "name": "Fireworks | moonshotai/kimi-k2",
+            "context_length": 131072,
+            "pricing": {
+                "prompt": "0.0000006",
+                "completion": "0.0000025",
+                "request": "0",
+                "image": "0",
+                "audio": "0",
+                "web_search": "0",
+                "internal_reasoning": "0",
+                "discount": 0
+            },
+            "provider_name": "Fireworks",
+            "tag": "fireworks/fp8",
+            "quantization": "fp8",
+            "max_completion_tokens": null,
+            "max_prompt_tokens": null,
+            "supported_parameters": [
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "tools",
+                "tool_choice",
+                "stop",
+                "frequency_penalty",
+                "presence_penalty",
+                "top_k",
+                "repetition_penalty",
+                "response_format",
+                "structured_outputs",
+                "logit_bias",
+                "logprobs",
+                "top_logprobs"
+            ],
+            "status": 0,
+            "uptime_last_30m": 99.60732984293193
+        }, {
+            "name": "BaseTen | moonshotai/kimi-k2",
+            "context_length": 131000,
+            "pricing": {
+                "prompt": "0.0000006",
+                "completion": "0.0000025",
+                "request": "0",
+                "image": "0",
+                "audio": "0",
+                "web_search": "0",
+                "internal_reasoning": "0",
+                "discount": 0
+            },
+            "provider_name": "BaseTen",
+            "tag": "baseten/fp4",
+            "quantization": "fp4",
+            "max_completion_tokens": 131000,
+            "max_prompt_tokens": null,
+            "supported_parameters": [
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "tools",
+                "tool_choice",
+                "structured_outputs",
+                "response_format",
+                "stop",
+                "frequency_penalty",
+                "presence_penalty"
+            ],
+            "status": 0,
+            "uptime_last_30m": 99.96375498368974
+        }, {
+            "name": "Moonshot AI | moonshotai/kimi-k2",
+            "context_length": 131072,
+            "pricing": {
+                "prompt": "0.0000006",
+                "completion": "0.0000025",
+                "request": "0",
+                "image": "0",
+                "audio": "0",
+                "web_search": "0",
+                "internal_reasoning": "0",
+                "input_cache_read": "0.00000015",
+                "discount": 0
+            },
+            "provider_name": "Moonshot AI",
+            "tag": "moonshotai/fp8",
+            "quantization": "fp8",
+            "max_completion_tokens": null,
+            "max_prompt_tokens": null,
+            "supported_parameters": [
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "tools",
+                "tool_choice",
+                "structured_outputs",
+                "response_format",
+                "stop",
+                "frequency_penalty",
+                "presence_penalty"
+            ],
+            "status": 0,
+            "uptime_last_30m": 99.91806636624334
+        }, {
+            "name": "Parasail | moonshotai/kimi-k2",
+            "context_length": 131072,
+            "pricing": {
+                "prompt": "0.00000099",
+                "completion": "0.00000299",
+                "request": "0",
+                "image": "0",
+                "audio": "0",
+                "web_search": "0",
+                "internal_reasoning": "0",
+                "discount": 0
+            },
+            "provider_name": "Parasail",
+            "tag": "parasail/fp8",
+            "quantization": "fp8",
+            "max_completion_tokens": 131072,
+            "max_prompt_tokens": null,
+            "supported_parameters": [
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "frequency_penalty",
+                "min_p",
+                "presence_penalty",
+                "repetition_penalty",
+                "seed",
+                "stop",
+                "top_k"
+            ],
+            "status": -2,
+            "uptime_last_30m": 92.10526315789474
+        }, {
+            "name": "Together | moonshotai/kimi-k2",
+            "context_length": 131072,
+            "pricing": {
+                "prompt": "0.000001",
+                "completion": "0.000003",
+                "request": "0",
+                "image": "0",
+                "audio": "0",
+                "web_search": "0",
+                "internal_reasoning": "0",
+                "discount": 0
+            },
+            "provider_name": "Together",
+            "tag": "together/fp8",
+            "quantization": "fp8",
+            "max_completion_tokens": 131072,
+            "max_prompt_tokens": null,
+            "supported_parameters": [
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "tools",
+                "tool_choice",
+                "structured_outputs",
+                "response_format",
+                "stop",
+                "frequency_penalty",
+                "presence_penalty",
+                "top_k",
+                "repetition_penalty",
+                "logit_bias",
+                "min_p"
+            ],
+            "status": 0,
+            "uptime_last_30m": 99.29522317932654
+        }, {
+            "name": "Groq | moonshotai/kimi-k2",
+            "context_length": 131072,
+            "pricing": {
+                "prompt": "0.000001",
+                "completion": "0.000003",
+                "request": "0",
+                "image": "0",
+                "audio": "0",
+                "web_search": "0",
+                "internal_reasoning": "0",
+                "discount": 0
+            },
+            "provider_name": "Groq",
+            "tag": "groq",
+            "quantization": null,
+            "max_completion_tokens": 16384,
+            "max_prompt_tokens": null,
+            "supported_parameters": [
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "tools",
+                "tool_choice",
+                "stop",
+                "frequency_penalty",
+                "presence_penalty",
+                "response_format",
+                "top_logprobs",
+                "logprobs",
+                "logit_bias",
+                "seed"
+            ],
+            "status": 0,
+            "uptime_last_30m": 99.11373707533235
+        }]
+    }
+}

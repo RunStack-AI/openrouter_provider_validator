@@ -12,28 +12,32 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-class EndpointParameter(BaseModel):
-    """Parameter configuration for an endpoint."""
-    type: str = Field(..., description="Parameter type")
-    description: Optional[str] = Field(None, description="Parameter description")
-    enum: Optional[List[str]] = Field(None, description="Possible values for the parameter")
-    default: Optional[Any] = Field(None, description="Default value for the parameter")
-
 class EndpointInfo(BaseModel):
     """Information about a specific provider endpoint for a model."""
-    id: str = Field(..., description="Provider+model ID")
-    name: str = Field(..., description="Display name")
-    organization: str = Field(..., description="Organization name")
-    description: Optional[str] = Field(None, description="Description of the endpoint")
-    pricing: Dict[str, float] = Field(..., description="Pricing per token, input/output")
+    name: str = Field(..., description="Display name of the endpoint")
     context_length: int = Field(..., description="Maximum context length")
-    supported_parameters: Dict[str, EndpointParameter] = Field(..., description="Parameters supported by this endpoint")
-    per_request_limits: Optional[Dict[str, Any]] = Field(None, description="Limits per request")
-    benchmark: Optional[Dict[str, Any]] = Field(None, description="Benchmark data")
+    pricing: Dict[str, Any] = Field(..., description="Pricing information")
+    provider_name: str = Field(..., description="Name of the provider")
+    tag: str = Field(..., description="Provider tag used in API requests")
+    quantization: Optional[str] = Field(None, description="Model quantization info")
+    max_completion_tokens: Optional[int] = Field(None, description="Maximum completion tokens")
+    max_prompt_tokens: Optional[int] = Field(None, description="Maximum prompt tokens")
+    supported_parameters: List[str] = Field(..., description="Parameters supported by this endpoint")
+    status: int = Field(..., description="Provider status")
+    uptime_last_30m: float = Field(..., description="Uptime percentage in last 30 minutes")
+
+class ModelInfo(BaseModel):
+    """Information about a model."""
+    id: str = Field(..., description="Model ID")
+    name: str = Field(..., description="Model display name")
+    created: int = Field(..., description="Creation timestamp")
+    description: str = Field(..., description="Model description")
+    architecture: Dict[str, Any] = Field(..., description="Architecture information")
+    endpoints: List[EndpointInfo] = Field(..., description="List of endpoints for this model")
 
 class ModelEndpointsResponse(BaseModel):
     """Response from the model endpoints API."""
-    data: List[EndpointInfo] = Field(..., description="List of endpoint details")
+    data: ModelInfo = Field(..., description="Model info with endpoints")
 
 class OpenRouterClient:
     """Client for OpenRouter API to fetch model and provider information."""
@@ -62,7 +66,7 @@ class OpenRouterClient:
         """
         async with httpx.AsyncClient() as client:
             response = await client.get(
-                f"{self.BASE_URL}/model/{model_id}/endpoints",
+                f"{self.BASE_URL}/models/{model_id}/endpoints",
                 headers=self.headers
             )
             
@@ -75,6 +79,7 @@ class OpenRouterClient:
                     pass
                 raise Exception(error_message)
                 
+            # Parse the response using the updated model structure
             return ModelEndpointsResponse(**response.json())
     
     async def get_providers_for_model(self, model_id: str, tools_support_only: bool = True) -> List[Dict[str, Any]]:
@@ -87,35 +92,38 @@ class OpenRouterClient:
         Returns:
             List of provider information dictionaries
         """
-        endpoints = await self.get_model_endpoints(model_id)
+        endpoints_response = await self.get_model_endpoints(model_id)
+        model_info = endpoints_response.data
         
         providers = []
-        for endpoint in endpoints.data:
+        for endpoint in model_info.endpoints:
             # Check if endpoint supports tools if filter is enabled
             supports_tools = "tools" in endpoint.supported_parameters
             if tools_support_only and not supports_tools:
                 continue
-                
-            # Extract provider ID from endpoint ID
-            # Example: fireworks/moonshot/kimi-k2-fp8 -> fireworks
-            provider_id = endpoint.id.split("/")[0] if "/" in endpoint.id else endpoint.id
             
-            # Calculate metrics like latency if available
+            # Extract provider tag
+            provider_tag = endpoint.tag
+                
+            # Calculate metrics like latency if available (would need to modify model to include benchmark data)
             latency_ms = None
-            if endpoint.benchmark and "latencies" in endpoint.benchmark:
-                latencies = endpoint.benchmark["latencies"]
-                if latencies and isinstance(latencies, list) and len(latencies) > 0:
-                    latency_ms = sum(latencies) / len(latencies)
+            
+            # Format pricing for input/output to maintain compatibility
+            pricing = {
+                "input": float(endpoint.pricing.get("prompt", 0)),
+                "output": float(endpoint.pricing.get("completion", 0))
+            }
             
             provider = {
-                "id": provider_id,
-                "endpoint_id": endpoint.id,
-                "name": f"{endpoint.organization}",
-                "description": endpoint.description or f"Provider for {model_id}",
+                "id": provider_tag,  # Use the tag as the provider ID
+                "endpoint_id": provider_tag,
+                "name": f"{endpoint.provider_name}",
+                "description": f"Provider for {model_id}",
                 "context_length": endpoint.context_length,
-                "pricing": endpoint.pricing,
+                "pricing": pricing,
                 "supports_tools": supports_tools,
-                "latency_ms": latency_ms
+                "latency_ms": latency_ms,
+                "tag": provider_tag  # Add tag explicitly for clarity
             }
             
             providers.append(provider)
@@ -124,7 +132,6 @@ class OpenRouterClient:
 
 # Main function for testing
 async def main():
-    import asyncio
     import sys
     
     if len(sys.argv) < 2:
@@ -140,6 +147,7 @@ async def main():
     for provider in providers:
         print(f"Provider: {provider['name']} (ID: {provider['id']})")
         print(f"Endpoint ID: {provider['endpoint_id']}")
+        print(f"Tag: {provider['tag']}")
         print(f"Description: {provider['description']}")
         print(f"Context Length: {provider['context_length']}")
         print(f"Pricing: Input ${provider['pricing'].get('input', 0)}/1K tokens, Output ${provider['pricing'].get('output', 0)}/1K tokens")
@@ -149,4 +157,5 @@ async def main():
         print()
 
 if __name__ == "__main__":
+    import asyncio
     asyncio.run(main())
