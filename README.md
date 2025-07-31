@@ -15,6 +15,7 @@ This project helps you assess the reliability and performance of different OpenR
 - Generate comparative reports across models
 - **Auto-detect available providers for specific models via API**
 - Test the same model across multiple providers automatically
+- **Run tests on multiple providers in parallel** with isolated test environments
 - Save detailed test results for analysis
 
 ## Architecture
@@ -37,6 +38,7 @@ The validator uses the PydanticAI framework to create a robust testing system:
 - **MCP Server**: Implements a FastMCP server that exposes filesystem operations as tools
 - **Model Interface**: Connects to OpenRouter through the `OpenAIModel` and `OpenAIProvider` classes
 - **Test Orchestration**: Manages testing across providers and models, collecting metrics and results
+- **Parallel Execution**: Uses `asyncio.gather()` to run provider tests concurrently with isolated file systems
 
 The test agent creates instances of the Agent class to run tests while tracking performance metrics.
 
@@ -108,13 +110,21 @@ python agent.py --model moonshot/kimi-k2 --all
 
 ### Testing With All Providers
 
-Test a model with all its enabled providers automatically:
+Test a model with all its enabled providers automatically (in parallel by default):
 
 ```bash
 python test_runner.py --models moonshot/kimi-k2 --all-providers
 ```
 
 This will automatically run all tests for each provider configured for the moonshot/kimi-k2 model, generating a comprehensive comparison report.
+
+### Testing With All Providers Sequentially
+
+If you prefer sequential testing instead of parallel execution:
+
+```bash
+python test_runner.py --models moonshot/kimi-k2 --all-providers --sequential
+```
 
 ### Automated Testing Across Models
 
@@ -162,6 +172,39 @@ Tests are organized as sequences of related prompts that build on each other. Ex
 3. Test error recovery capabilities
 
 The full set of test sequences is defined in `data/prompts.json` and can be customized.
+
+## Parallel Provider Testing
+
+The system supports testing multiple providers simultaneously, which significantly improves testing efficiency. Key aspects of the parallel testing implementation:
+
+### Provider-Specific Test Directories
+
+Each provider gets its own isolated test environment:
+- Test files are stored in `data/test_files/{model}_{provider}/`
+- Test files are copied from templates at the start of each test
+- This prevents file conflicts when multiple providers run tests concurrently
+
+### Parallel Execution Control
+
+- Tests run in parallel by default when testing multiple providers
+- Use the `--sequential` flag to disable parallel execution
+- Concurrent testing uses `asyncio.gather()` for efficient execution
+
+### Directory Structure
+
+```
+data/
+└── test_files/
+    ├── templates/          # Template files for all tests
+    │   └── nested/
+    │       └── sample3.txt
+    ├── model1_provider1/   # Provider-specific test directory
+    │   └── nested/
+    │       └── sample3.txt
+    └── model1_provider2/   # Another provider's test directory
+        └── nested/
+            └── sample3.txt
+```
 
 ## Test Results
 
@@ -211,6 +254,14 @@ Add new test scenarios to `data/prompts.json` following this format:
   ]
 }
 ```
+
+### Adding Test File Templates
+
+To customize the test files used by all providers:
+
+1. Create a `data/test_files/templates/` directory
+2. Add your template files and directories
+3. These templates will be copied to each provider's test directory before testing
 
 ### Customizing the Agent Behavior
 
