@@ -94,17 +94,7 @@ class ProviderTester:
         self.total_latency = 0
         
         # Set up OpenRouter based model
-        self.openai_model = OpenAIModel(
-            model, 
-            provider=OpenAIProvider(
-                base_url=ROUTER_BASE_URL,
-                api_key=api_key,
-                default_headers={
-                    "HTTP-Referer": ROUTER_SITE_URL,
-                    "X-Title": ROUTER_APP_TITLE
-                }
-            ),
-        )
+        self.openai_model = None
         
         # Set up MCP Server environment variables
         self.mcp_env = {
@@ -156,13 +146,24 @@ class ProviderTester:
         self.mcp_servers = [
             MCPServerStdio('python', ['./mcp_server.py'], env=self.mcp_env)
         ]
+
+        from pydantic_ai.settings import ModelSettings
+        model_settings = ModelSettings(provider=self.provider)
+        self.openai_model = OpenAIModel(
+            self.model,
+            provider=OpenAIProvider(
+                base_url='https://openrouter.ai/api/v1',
+                api_key=api_key
+            ),
+            settings=model_settings
+        )
         
         # If provider is specified, add it to the transforms
-        provider_transforms = None
-        if self.provider:
-            provider_transforms = [{"type": "provider_filter", "providers": [self.provider]}]
-            # Add this to the model config
-            self.openai_model.default_options["transforms"] = provider_transforms
+        # provider_transforms = None
+        # if self.provider:
+        #     provider_transforms = [{"type": "provider_filter", "providers": [self.provider]}]
+        #     # Add this to the model config
+        #     self.openai_model.default_options["transforms"] = provider_transforms
             
         # Create the agent
         self.agent = Agent(self.openai_model, mcp_servers=self.mcp_servers, system_prompt=system_prompt)
@@ -240,7 +241,7 @@ class ProviderTester:
             self.total_latency += latency
             
             # Extract provider info from response if available
-            response_json = agent_result.raw_responses[-1] if agent_result.raw_responses else {}
+            response_json = agent_result.new_messages()[-1] if agent_result.new_messages() else {}
             if isinstance(response_json, dict) and "provider" in response_json and not self.provider:
                 self.provider = response_json.get("provider")
             
@@ -364,13 +365,31 @@ class ProviderTester:
         result_dir = Path("results")
         result_dir.mkdir(exist_ok=True)
         
+        # Create a filename-safe version of model and provider for the path
+        model_safe = self.model.replace('/', '_')
         provider_suffix = f"_{self.provider}" if self.provider else ""
-        result_file = result_dir / f"{self.model.replace('/', '_')}_{prompt_id}{provider_suffix}_{timestamp}.json"
         
-        with open(result_file, "w") as f:
-            json.dump(result, f, indent=2)
+        # Determine file path; handle both nested and flat formats
+        if '/' in self.model or '\\' in self.model or result_dir.is_dir():
+            # If we need a subdirectory approach (error suggests this)
+            subdir = result_dir / f"{model_safe}_{prompt_id}{provider_suffix}"
+            subdir.mkdir(exist_ok=True, parents=True)
+            result_file = subdir / f"{self.provider or 'default'}_{timestamp}.json"
+            logger.info(f"Saving results to subdirectory: {subdir}")
+        else:
+            # Flat approach for backward compatibility
+            result_file = result_dir / f"{model_safe}_{prompt_id}{provider_suffix}_{timestamp}.json"
         
-        logger.info(f"Test results saved to {result_file}")
+        # Ensure all parent directories exist
+        result_file.parent.mkdir(exist_ok=True, parents=True)
+        
+        try:
+            with open(result_file, "w") as f:
+                json.dump(result, f, indent=2)
+            logger.info(f"Test results saved to {result_file}")
+        except Exception as e:
+            logger.error(f"Failed to save results file: {e}")
+        
         return result
 
 async def list_providers_for_model(model: str):

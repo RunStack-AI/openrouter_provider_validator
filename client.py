@@ -5,27 +5,11 @@ Filesystem client for managing test data, configurations, and results.
 
 import json
 import os
+import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Union
 from datetime import datetime
 from pydantic import BaseModel, Field
-
-
-class ProviderConfig(BaseModel):
-    """Configuration for an OpenRouter provider."""
-    name: str = Field(description="Provider name (e.g., 'anthropic', 'openai')")
-    model: str = Field(description="Model identifier")
-    description: Optional[str] = Field(default=None, description="Provider description")
-    enabled: bool = Field(default=True, description="Whether provider is enabled for testing")
-
-
-class TestPrompt(BaseModel):
-    """Test prompt configuration."""
-    id: str = Field(description="Unique prompt identifier")
-    name: str = Field(description="Human-readable prompt name")
-    prompt: str = Field(description="The actual prompt text")
-    category: str = Field(description="Prompt category (e.g., 'tool_use', 'reasoning')")
-    expected_tools: Optional[List[str]] = Field(default=None, description="Expected tools to be used")
 
 
 class TestResult(BaseModel):
@@ -34,12 +18,12 @@ class TestResult(BaseModel):
     model: str = Field(description="Model used")
     prompt_id: str = Field(description="Prompt identifier")
     success: bool = Field(description="Whether test succeeded")
-    response_id: Optional[str] = Field(default=None, description="OpenAI response ID")
-    timestamp: datetime = Field(description="Test execution timestamp")
+    response_data: Optional[Dict[str, Any]] = Field(default=None, description="Full response data")
+    token_usage: Optional[Dict[str, int]] = Field(default=None, description="Token usage statistics")
     error_message: Optional[str] = Field(default=None, description="Error message if failed")
     error_category: Optional[str] = Field(default=None, description="Classified error category")
-    token_usage: Optional[Dict[str, int]] = Field(default=None, description="Token usage statistics")
-    response_data: Optional[Dict[str, Any]] = Field(default=None, description="Full response data")
+    timestamp: str = Field(description="Test execution timestamp")
+    metrics: Optional[Dict[str, Any]] = Field(default=None, description="Performance metrics")
 
 
 class ProviderSummary(BaseModel):
@@ -50,7 +34,7 @@ class ProviderSummary(BaseModel):
     successful_attempts: int = Field(description="Successful attempts")
     failure_rate: float = Field(description="Failure rate as percentage")
     error_categories: Dict[str, int] = Field(description="Error counts by category")
-    avg_response_time: Optional[float] = Field(default=None, description="Average response time")
+    avg_response_time: Optional[float] = Field(default=None, description="Average response time in ms")
 
 
 class FileSystemClient:
@@ -70,88 +54,327 @@ class FileSystemClient:
         directories = [
             self.base_path / "data",
             self.base_path / "results",
-            self.base_path / "reports"
+            self.base_path / "reports",
+            self.base_path / "logs",
+            self.base_path / "data/test_files",
+            self.base_path / "data/test_files/nested"
         ]
         for directory in directories:
-            directory.mkdir(exist_ok=True)
+            directory.mkdir(exist_ok=True, parents=True)
     
-    def load_providers(self) -> List[ProviderConfig]:
-        """Load provider configurations from providers.json.
-        
-        Returns:
-            List of provider configurations
-        """
-        providers_file = self.base_path / "data" / "providers.json"
-        if not providers_file.exists():
-            return []
-        
-        with open(providers_file, 'r') as f:
-            data = json.load(f)
-        
-        return [ProviderConfig(**provider) for provider in data]
+    # File system operations for MCP Server
     
-    def save_providers(self, providers: List[ProviderConfig]) -> None:
-        """Save provider configurations to providers.json.
+    def read_file(self, path: str) -> str:
+        """Read file content.
         
         Args:
-            providers: List of provider configurations to save
+            path: Path to file
+            
+        Returns:
+            File content
         """
-        providers_file = self.base_path / "data" / "providers.json"
-        data = [provider.model_dump() for provider in providers]
-        
-        with open(providers_file, 'w') as f:
-            json.dump(data, f, indent=2)
+        try:
+            with open(path, "r") as f:
+                return f.read()
+        except Exception as e:
+            raise ValueError(f"Error reading file: {str(e)}")
     
-    def load_prompts(self) -> List[TestPrompt]:
+    def write_file(self, path: str, content: str) -> bool:
+        """Write content to a file.
+        
+        Args:
+            path: Path to file
+            content: Content to write
+            
+        Returns:
+            True if successful
+        """
+        try:
+            # Create parent directories if they don't exist
+            Path(path).parent.mkdir(exist_ok=True, parents=True)
+            
+            with open(path, "w") as f:
+                f.write(content)
+            return True
+        except Exception as e:
+            raise ValueError(f"Error writing to file: {str(e)}")
+    
+    def append_to_file(self, path: str, content: str, create_if_missing: bool = True) -> bool:
+        """Append content to a file.
+        
+        Args:
+            path: Path to file
+            content: Content to append
+            create_if_missing: Whether to create the file if it doesn't exist
+            
+        Returns:
+            True if successful
+        """
+        try:
+            # Create parent directories if they don't exist
+            Path(path).parent.mkdir(exist_ok=True, parents=True)
+            
+            if not os.path.exists(path) and not create_if_missing:
+                raise ValueError(f"File {path} does not exist and create_if_missing is False")
+            
+            with open(path, "a") as f:
+                f.write(content)
+            return True
+        except Exception as e:
+            raise ValueError(f"Error appending to file: {str(e)}")
+    
+    def file_exists(self, path: str) -> bool:
+        """Check if a file exists.
+        
+        Args:
+            path: Path to file
+            
+        Returns:
+            True if the file exists
+        """
+        return os.path.isfile(path)
+    
+    def list_folder_contents(self, path: str, include_details: bool = False) -> List[Dict[str, Any]]:
+        """List contents of a directory.
+        
+        Args:
+            path: Directory path
+            include_details: Whether to include file details
+            
+        Returns:
+            List of directory contents
+        """
+        try:
+            entries = []
+            for entry in os.listdir(path):
+                entry_path = os.path.join(path, entry)
+                if not include_details:
+                    entries.append({
+                        "name": entry,
+                        "type": "directory" if os.path.isdir(entry_path) else "file"
+                    })
+                else:
+                    if os.path.isdir(entry_path):
+                        entries.append({
+                            "name": entry,
+                            "type": "directory",
+                            "path": entry_path,
+                        })
+                    else:
+                        entries.append({
+                            "name": entry,
+                            "type": "file",
+                            "path": entry_path,
+                            "size": os.path.getsize(entry_path),
+                            "modified": os.path.getmtime(entry_path)
+                        })
+            
+            return entries
+        except Exception as e:
+            raise ValueError(f"Error listing directory contents: {str(e)}")
+    
+    def create_folders(self, paths: List[str]) -> bool:
+        """Create one or more directories.
+        
+        Args:
+            paths: List of directory paths to create
+            
+        Returns:
+            True if successful
+        """
+        try:
+            for path in paths:
+                os.makedirs(path, exist_ok=True)
+            return True
+        except Exception as e:
+            raise ValueError(f"Error creating directories: {str(e)}")
+    
+    def search_files(self, pattern: str, path: str = ".", recursive: bool = True) -> List[Dict[str, Any]]:
+        """Search for files matching a pattern.
+        
+        Args:
+            pattern: Text pattern to search for
+            path: Directory to search in
+            recursive: Whether to search in subdirectories
+            
+        Returns:
+            List of matches
+        """
+        try:
+            matches = []
+            
+            for root, dirs, files in os.walk(path):
+                if not recursive and root != path:
+                    continue
+                    
+                for filename in files:
+                    file_path = os.path.join(root, filename)
+                    if not os.path.isfile(file_path):
+                        continue
+                        
+                    try:
+                        with open(file_path, "r") as f:
+                            content = f.read()
+                            
+                        if pattern.lower() in content.lower():
+                            # Extract relevant context around match
+                            lines = content.split("\n")
+                            line_matches = []
+                            
+                            for i, line in enumerate(lines):
+                                if pattern.lower() in line.lower():
+                                    start = max(0, i - 2)
+                                    end = min(len(lines), i + 3)
+                                    context = "\n".join(lines[start:end])
+                                    line_matches.append({
+                                        "line_number": i + 1,
+                                        "context": context
+                                    })
+                            
+                            if line_matches:
+                                matches.append({
+                                    "path": file_path,
+                                    "matches": line_matches
+                                })
+                    except Exception:
+                        # Skip files we can't read
+                        pass
+            
+            return matches
+        except Exception as e:
+            raise ValueError(f"Error searching files: {str(e)}")
+    
+    def copy_entry(self, source_path: str, destination_path: str, overwrite: bool = False) -> bool:
+        """Copy a file or directory.
+        
+        Args:
+            source_path: Source path
+            destination_path: Destination path
+            overwrite: Whether to overwrite existing files
+            
+        Returns:
+            True if successful
+        """
+        try:
+            # Check if destination exists and we're not overwriting
+            if os.path.exists(destination_path) and not overwrite:
+                raise ValueError(f"Destination {destination_path} already exists and overwrite is False")
+            
+            if os.path.isdir(source_path):
+                if os.path.exists(destination_path):
+                    if overwrite:
+                        shutil.rmtree(destination_path)
+                    else:
+                        raise ValueError(f"Directory {destination_path} already exists")
+                        
+                shutil.copytree(source_path, destination_path)
+            else:
+                # Create parent directories if needed
+                os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+                shutil.copy2(source_path, destination_path)
+                
+            return True
+        except Exception as e:
+            raise ValueError(f"Error copying {source_path} to {destination_path}: {str(e)}")
+    
+    def move_entry(self, source_path: str, destination_dir: str, overwrite: bool = False) -> bool:
+        """Move a file or directory.
+        
+        Args:
+            source_path: Source path
+            destination_dir: Destination directory
+            overwrite: Whether to overwrite existing files
+            
+        Returns:
+            True if successful
+        """
+        try:
+            # Make sure destination directory exists
+            os.makedirs(destination_dir, exist_ok=True)
+            
+            # Get base name of source
+            base_name = os.path.basename(source_path)
+            destination_path = os.path.join(destination_dir, base_name)
+            
+            # Check if destination exists and we're not overwriting
+            if os.path.exists(destination_path) and not overwrite:
+                raise ValueError(f"Destination {destination_path} already exists and overwrite is False")
+            
+            # Move the file or directory
+            shutil.move(source_path, destination_path)
+            return True
+        except Exception as e:
+            raise ValueError(f"Error moving {source_path} to {destination_dir}: {str(e)}")
+    
+    # Test data operations
+    
+    def load_prompts(self, filepath: str = "data/prompts.json") -> List[Dict[str, Any]]:
         """Load test prompts from prompts.json.
         
+        Args:
+            filepath: Path to prompts file
+            
         Returns:
             List of test prompts
         """
-        prompts_file = self.base_path / "data" / "prompts.json"
-        if not prompts_file.exists():
+        try:
+            prompt_path = Path(filepath)
+            if not prompt_path.exists():
+                return []
+            
+            with open(prompt_path, "r") as f:
+                prompts = json.load(f)
+                
+            return prompts
+        except Exception as e:
+            print(f"Error loading prompts: {str(e)}")
             return []
-        
-        with open(prompts_file, 'r') as f:
-            data = json.load(f)
-        
-        return [TestPrompt(**prompt) for prompt in data]
     
-    def save_prompts(self, prompts: List[TestPrompt]) -> None:
-        """Save test prompts to prompts.json.
+    def save_test_results(self, model: str, results: List[TestResult]) -> None:
+        """Save a batch of test results for a model.
         
         Args:
-            prompts: List of test prompts to save
-        """
-        prompts_file = self.base_path / "data" / "prompts.json"
-        data = [prompt.model_dump() for prompt in prompts]
-        
-        with open(prompts_file, 'w') as f:
-            json.dump(data, f, indent=2)
-    
-    def save_test_result(self, result: TestResult) -> None:
-        """Save individual test result.
-        
-        Args:
-            result: Test result to save
+            model: Model identifier
+            results: List of test results
         """
         # Create model-specific results directory
-        model_dir = self.base_path / "results" / result.model.replace("/", "_")
-        model_dir.mkdir(exist_ok=True)
+        model_dir = self.base_path / "results" / model.replace("/", "_")
+        model_dir.mkdir(exist_ok=True, parents=True)
         
-        # Save result with timestamp
-        timestamp = result.timestamp.strftime("%Y%m%d_%H%M%S")
-        filename = f"{result.provider}_{result.prompt_id}_{timestamp}.json"
-        result_file = model_dir / filename
-        
-        with open(result_file, 'w') as f:
-            json.dump(result.model_dump(mode='json'), f, indent=2, default=str)
+        # Save each result in the batch
+        for result in results:
+            # Extract timestamp from ISO format
+            if isinstance(result.timestamp, str):
+                try:
+                    dt = datetime.fromisoformat(result.timestamp.replace('Z', '+00:00'))
+                    timestamp_str = dt.strftime("%Y%m%d_%H%M%S")
+                except ValueError:
+                    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            else:
+                timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Generate filename with timestamp
+            filename = f"{result.provider}_{result.prompt_id}_{timestamp_str}.json"
+            result_file = model_dir / filename
+            
+            # Ensure the directory exists (redundant but safe)
+            result_file.parent.mkdir(exist_ok=True, parents=True)
+            
+            # Save as JSON with preprocessing for safe serialization
+            try:
+                with open(result_file, "w") as f:
+                    # Convert to dict, handling datetime objects
+                    result_dict = json.loads(result.json())
+                    json.dump(result_dict, f, indent=2)
+                print(f"Saved test result to {result_file}")
+            except Exception as e:
+                print(f"Error saving test result: {str(e)}")
     
     def load_test_results(self, model: Optional[str] = None) -> List[TestResult]:
         """Load test results, optionally filtered by model.
         
         Args:
-            model: Optional model name to filter by
+            model: Optional model identifier to filter by
             
         Returns:
             List of test results
@@ -159,22 +382,31 @@ class FileSystemClient:
         results = []
         results_dir = self.base_path / "results"
         
+        if not results_dir.exists():
+            return []
+            
         if model:
             # Load results for specific model
             model_dir = results_dir / model.replace("/", "_")
-            if model_dir.exists():
-                for result_file in model_dir.glob("*.json"):
-                    with open(result_file, 'r') as f:
-                        data = json.load(f)
-                    results.append(TestResult(**data))
+            if model_dir.exists() and model_dir.is_dir():
+                for result_file in model_dir.glob("**/*.json"):  # Use recursive glob to find in subdirectories
+                    try:
+                        with open(result_file, "r") as f:
+                            result_data = json.load(f)
+                        results.append(TestResult(**result_data))
+                    except Exception as e:
+                        print(f"Error loading result file {result_file}: {str(e)}")
         else:
-            # Load all results
+            # Load results for all models
             for model_dir in results_dir.iterdir():
                 if model_dir.is_dir():
-                    for result_file in model_dir.glob("*.json"):
-                        with open(result_file, 'r') as f:
-                            data = json.load(f)
-                        results.append(TestResult(**data))
+                    for result_file in model_dir.glob("**/*.json"):  # Use recursive glob
+                        try:
+                            with open(result_file, "r") as f:
+                                result_data = json.load(f)
+                            results.append(TestResult(**result_data))
+                        except Exception as e:
+                            print(f"Error loading result file {result_file}: {str(e)}")
         
         return results
     
@@ -182,7 +414,7 @@ class FileSystemClient:
         """Generate summary statistics for all providers of a model.
         
         Args:
-            model: Model name to generate summary for
+            model: Model identifier to generate summary for
             
         Returns:
             List of provider summaries
@@ -194,31 +426,47 @@ class FileSystemClient:
             provider = result.provider
             if provider not in provider_stats:
                 provider_stats[provider] = {
-                    'total_attempts': 0,
-                    'successful_attempts': 0,
-                    'error_categories': {}
+                    "total_attempts": 0,
+                    "successful_attempts": 0,
+                    "error_categories": {},
+                    "response_times": []
                 }
             
-            provider_stats[provider]['total_attempts'] += 1
+            provider_stats[provider]["total_attempts"] += 1
+            
             if result.success:
-                provider_stats[provider]['successful_attempts'] += 1
+                provider_stats[provider]["successful_attempts"] += 1
+                
+                # Track response times from successful requests
+                if result.metrics and "latency_ms" in result.metrics:
+                    provider_stats[provider]["response_times"].append(result.metrics["latency_ms"])
             else:
-                category = result.error_category or 'unknown'
-                provider_stats[provider]['error_categories'][category] = \
-                    provider_stats[provider]['error_categories'].get(category, 0) + 1
+                # Track error categories
+                category = result.error_category or "unknown_error"
+                provider_stats[provider]["error_categories"][category] = \
+                    provider_stats[provider]["error_categories"].get(category, 0) + 1
         
+        # Convert to ProviderSummary objects
         summaries = []
         for provider, stats in provider_stats.items():
-            failure_rate = ((stats['total_attempts'] - stats['successful_attempts']) / 
-                          stats['total_attempts'] * 100) if stats['total_attempts'] > 0 else 0
+            failure_rate = 0
+            if stats["total_attempts"] > 0:
+                failure_rate = ((stats["total_attempts"] - stats["successful_attempts"]) / 
+                               stats["total_attempts"] * 100)
+            
+            # Calculate average response time if available
+            avg_response_time = None
+            if stats["response_times"]:
+                avg_response_time = sum(stats["response_times"]) / len(stats["response_times"])
             
             summary = ProviderSummary(
                 provider=provider,
                 model=model,
-                total_attempts=stats['total_attempts'],
-                successful_attempts=stats['successful_attempts'],
+                total_attempts=stats["total_attempts"],
+                successful_attempts=stats["successful_attempts"],
                 failure_rate=failure_rate,
-                error_categories=stats['error_categories']
+                error_categories=stats["error_categories"],
+                avg_response_time=avg_response_time
             )
             summaries.append(summary)
         
@@ -231,15 +479,29 @@ class FileSystemClient:
             report_name: Name of the report file
             content: Report content
         """
-        report_file = self.base_path / "reports" / f"{report_name}.md"
-        with open(report_file, 'w') as f:
-            f.write(content)
+        reports_dir = self.base_path / "reports"
+        reports_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Handle report names that might include subdirectories
+        if '/' in report_name or '\\' in report_name:
+            report_path = reports_dir / report_name
+            report_path = report_path.with_suffix('.md')  # Add .md extension if not present
+            report_path.parent.mkdir(exist_ok=True, parents=True)
+        else:
+            report_path = reports_dir / f"{report_name}.md"
+        
+        try:
+            with open(report_path, "w") as f:
+                f.write(content)
+            print(f"Saved report to {report_path}")
+        except Exception as e:
+            print(f"Error saving report: {str(e)}")
     
     def list_models(self) -> List[str]:
         """List all models that have test results.
         
         Returns:
-            List of model names
+            List of unique model names
         """
         results_dir = self.base_path / "results"
         if not results_dir.exists():
@@ -252,47 +514,34 @@ class FileSystemClient:
                 model_name = model_dir.name.replace("_", "/")
                 models.append(model_name)
         
-        return sorted(models)
-    
-    def clear_results(self, model: Optional[str] = None) -> None:
-        """Clear test results, optionally for a specific model.
-        
-        Args:
-            model: Optional model name to clear results for
-        """
-        results_dir = self.base_path / "results"
-        
-        if model:
-            model_dir = results_dir / model.replace("/", "_")
-            if model_dir.exists():
-                for result_file in model_dir.glob("*.json"):
-                    result_file.unlink()
-                model_dir.rmdir()
-        else:
-            # Clear all results
-            for model_dir in results_dir.iterdir():
-                if model_dir.is_dir():
-                    for result_file in model_dir.glob("*.json"):
-                        result_file.unlink()
-                    model_dir.rmdir()
+        return models
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get overall statistics about the validator data.
+        """Get overall statistics about the test data.
         
         Returns:
-            Dictionary with statistics
+            Dictionary of statistics
         """
-        providers = self.load_providers()
+        # Load provider information from provider_config instead of directly
+        from provider_config import ProviderConfig
+        providers = ProviderConfig.load_providers()
+        
+        # Load prompts and results directly
         prompts = self.load_prompts()
-        models = self.list_models()
         all_results = self.load_test_results()
+        models = self.list_models()
+        
+        enabled_providers = sum(1 for p in providers if p.get("enabled", True))
+        
+        successful_tests = len([r for r in all_results if r.success])
+        failed_tests = len([r for r in all_results if not r.success])
         
         return {
-            'total_providers': len(providers),
-            'enabled_providers': len([p for p in providers if p.enabled]),
-            'total_prompts': len(prompts),
-            'models_tested': len(models),
-            'total_test_results': len(all_results),
-            'successful_tests': len([r for r in all_results if r.success]),
-            'failed_tests': len([r for r in all_results if not r.success])
+            "total_providers": len(providers),
+            "enabled_providers": enabled_providers,
+            "total_prompts": len(prompts),
+            "models_tested": len(models),
+            "total_test_results": len(all_results),
+            "successful_tests": successful_tests,
+            "failed_tests": failed_tests
         }
