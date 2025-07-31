@@ -1,108 +1,163 @@
 """OpenRouter Provider Validator - Error Classifier
 
-Analyzes error messages to categorize them for reporting and analysis.
+Classifies errors encountered during testing into standardized categories.
 """
 
 import re
-from typing import Dict, List, Optional
+from typing import Dict, Optional, Any, List, Tuple
 
-# Define error categories and patterns to identify them
-ERROR_CATEGORIES = {
-    "rate_limit": ["rate limit", "too many requests", "429"],
-    "authentication": ["unauthorized", "invalid api key", "401"],
-    "provider_error": ["provider error", "upstream error", "502"],
-    "tool_format": ["tool", "function", "invalid format", "invalid json"],
-    "timeout": ["timeout", "connection", "504", "request timed out"],
-    "model_unavailable": ["model not available", "503", "model is overloaded"],
-    "context_length": ["context length", "too long", "token limit"],
-    "content_filter": ["content filter", "content policy", "violates", "inappropriate"]
-}
-
-def classify_error(error_message: str) -> str:
-    """Classify an error message into one of the predefined categories.
+def classify_error(status_code: Optional[int], error_message: str) -> str:
+    """Classify an error into a standardized category.
     
     Args:
-        error_message: The error message text to classify
+        status_code: HTTP status code (if available)
+        error_message: Error message text
         
     Returns:
-        Error category name, or 'unknown' if no match is found
+        Standardized error category
     """
-    if not error_message:
-        return "unknown"
+    error_message = str(error_message).lower()
     
-    # Normalize the error message for matching
-    normalized_error = error_message.lower()
+    # Check for rate limit errors
+    if status_code == 429 or any(pattern in error_message for pattern in [
+        "rate limit", 
+        "too many requests", 
+        "ratelimit", 
+        "quota exceeded",
+        "request limit"
+    ]):
+        return "rate_limit_error"
     
-    # Check each category for matching patterns
-    for category, patterns in ERROR_CATEGORIES.items():
-        for pattern in patterns:
-            if pattern.lower() in normalized_error:
-                return category
+    # Check for authentication errors
+    if status_code in (401, 403) or any(pattern in error_message for pattern in [
+        "unauthorized", 
+        "authentication", 
+        "auth", 
+        "invalid key", 
+        "invalid api key",
+        "permission",
+        "forbidden"
+    ]):
+        return "authentication_error"
     
-    # Default category if no match is found
-    return "unknown"
+    # Check for server errors
+    if (status_code and status_code >= 500) or any(pattern in error_message for pattern in [
+        "server error", 
+        "internal error", 
+        "service unavailable"
+    ]):
+        return "server_error"
+    
+    # Check for timeout errors
+    if any(pattern in error_message for pattern in [
+        "timeout", 
+        "timed out", 
+        "deadline exceeded"
+    ]):
+        return "timeout_error"
+    
+    # Check for content filtering/moderation errors
+    if any(pattern in error_message for pattern in [
+        "content policy", 
+        "content filter", 
+        "moderation", 
+        "inappropriate", 
+        "harmful content",
+        "violates policy"
+    ]):
+        return "content_filter_error"
+    
+    # Check for input validation errors
+    if status_code == 400 or any(pattern in error_message for pattern in [
+        "invalid request", 
+        "validation error", 
+        "invalid parameter", 
+        "bad request"
+    ]):
+        return "input_validation_error"
+    
+    # Check for tool-related errors
+    if any(pattern in error_message for pattern in [
+        "tool", 
+        "function", 
+        "not found", 
+        "invalid tool", 
+        "invalid function",
+        "not supported"
+    ]):
+        return "tool_usage_error"
+    
+    # Check for token/context length errors
+    if any(pattern in error_message for pattern in [
+        "token", 
+        "context length", 
+        "too long", 
+        "maximum context"
+    ]):
+        return "token_limit_error"
+    
+    # Check for request formatting errors
+    if any(pattern in error_message for pattern in [
+        "json", 
+        "format", 
+        "malformed", 
+        "syntax", 
+        "parsing"
+    ]):
+        return "request_format_error"
+    
+    # Check for provider-specific errors
+    if any(pattern in error_message for pattern in [
+        "provider", 
+        "model", 
+        "routing", 
+        "not available"
+    ]):
+        return "provider_error"
+    
+    # Default to unknown/other
+    return "unknown_error"
 
-def get_error_categories() -> Dict[str, List[str]]:
-    """Get the defined error categories and their patterns.
-    
-    Returns:
-        Dictionary mapping category names to lists of patterns
-    """
-    return ERROR_CATEGORIES
-
-def analyze_error_distribution(error_counts: Dict[str, int]) -> Dict[str, float]:
-    """Analyze the distribution of errors across categories.
+def get_error_description(category: str) -> str:
+    """Get a human-readable description of an error category.
     
     Args:
-        error_counts: Dictionary mapping category names to error counts
+        category: The error category
         
     Returns:
-        Dictionary mapping category names to percentage of total errors
+        Human-readable description
     """
-    total_errors = sum(error_counts.values())
-    if total_errors == 0:
-        return {}
-    
-    distribution = {}
-    for category, count in error_counts.items():
-        distribution[category] = (count / total_errors) * 100
-    
-    return distribution
-
-def extract_error_details(error_message: str) -> Dict[str, Optional[str]]:
-    """Extract specific details from error messages using regex patterns.
-    
-    Args:
-        error_message: The error message text to analyze
-        
-    Returns:
-        Dictionary containing extracted error details
-    """
-    details = {
-        "status_code": None,
-        "request_id": None,
-        "error_type": None,
-        "error_code": None
+    descriptions = {
+        "rate_limit_error": "Rate limits exceeded or too many requests in a time period",
+        "authentication_error": "Authentication or authorization problems",
+        "server_error": "Server-side errors or service unavailability",
+        "timeout_error": "Request timed out or took too long to complete",
+        "content_filter_error": "Content was flagged or filtered by safety measures",
+        "input_validation_error": "Invalid input parameters or validation failures",
+        "tool_usage_error": "Issues with function or tool usage/format",
+        "token_limit_error": "Exceeded token or context length limits",
+        "request_format_error": "Malformed request or formatting problems",
+        "provider_error": "Provider-specific errors or routing issues",
+        "unknown_error": "Unclassified or unknown error type",
+        "configuration_error": "Local configuration issues or missing settings",
+        "max_retries_exceeded": "Maximum retry attempts reached without success"
     }
     
-    # Extract HTTP status code
-    status_code_match = re.search(r'status[\s_-]code[:\s]*(\d+)', error_message, re.IGNORECASE)
-    if status_code_match:
-        details["status_code"] = status_code_match.group(1)
+    return descriptions.get(category, "No description available")
+
+def analyze_error_patterns(error_messages: List[str]) -> Dict[str, int]:
+    """Analyze patterns across multiple errors to find common issues.
     
-    # Extract request ID if present
-    request_id_match = re.search(r'req[\s_-]?(?:uest)?[\s_-]?(?:id)?[:\s]*([a-zA-Z0-9-]+)', error_message, re.IGNORECASE)
-    if request_id_match:
-        details["request_id"] = request_id_match.group(1)
+    Args:
+        error_messages: List of error message strings
+        
+    Returns:
+        Dictionary of error patterns and their frequencies
+    """
+    patterns = {}
     
-    # Extract error type if present
-    error_type_match = re.search(r'error[\s_-](?:type)?[:\s]*([a-zA-Z0-9_]+)', error_message, re.IGNORECASE)
-    if error_type_match:
-        details["error_type"] = error_type_match.group(1)
+    for message in error_messages:
+        category = classify_error(None, message)
+        patterns[category] = patterns.get(category, 0) + 1
     
-    # Extract error code if present
-    error_code_match = re.search(r'error[\s_-]code[:\s]*([a-zA-Z0-9_]+)', error_message, re.IGNORECASE)
-    if error_code_match:
-        details["error_code"] = error_code_match.group(1)
-    
-    return details
+    return patterns

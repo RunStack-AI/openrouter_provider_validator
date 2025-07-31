@@ -27,6 +27,11 @@ file_handler = logging.FileHandler(log_file)
 file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
 logger.addHandler(file_handler)
 
+# Check for custom test files directory from environment
+TEST_FILES_DIR = os.getenv("TEST_FILES_DIR")
+if TEST_FILES_DIR:
+    logger.info(f"Using custom test files directory: {TEST_FILES_DIR}")
+
 # Define BaseModels for requests and responses
 class PathRequest(BaseModel):
     """Request with a file path."""
@@ -175,12 +180,24 @@ async def lifespan(server: FastMCP):
     """Initialize and cleanup resources for the MCP server."""
     # Import and initialize the client
     from client import FileSystemClient
+    from filesystem_test_helper import FileSystemTestHelper
     
     client = FileSystemClient()
-    logger.info("Initialized FileSystemClient for MCP Server")
+    
+    # Create test helper with custom test directory if specified
+    test_files_dir = None
+    if TEST_FILES_DIR:
+        test_files_dir = Path(TEST_FILES_DIR)
+        logger.info(f"Using provider-specific test directory: {test_files_dir}")
+        test_helper = FileSystemTestHelper(test_files_dir=test_files_dir)
+    else:
+        logger.info("Using default test directory")
+        test_helper = FileSystemTestHelper()
+    
+    logger.info("Initialized clients for MCP Server")
     
     try:
-        yield {"client": client}
+        yield {"client": client, "test_helper": test_helper}
     finally:
         logger.info("Shutting down MCP server")
 
@@ -202,11 +219,12 @@ def read_file(request: PathRequest, ctx: Context) -> FileContentResponse:
     Returns:
         File content or error message
     """
-    client = ctx.request_context.lifespan_context["client"]
+    # Use test_helper for better path handling with provider-specific directories
+    test_helper = ctx.request_context.lifespan_context["test_helper"]
     
     try:
         logger.info(f"Reading file: {request.path}")
-        content = client.read_file(request.path)
+        content = test_helper.read_file(request.path)
         return FileContentResponse(content=content, success=True)
     except Exception as e:
         logger.error(f"Error reading file {request.path}: {str(e)}")
@@ -223,11 +241,11 @@ def write_file(request: ContentRequest, ctx: Context) -> OperationResponse:
     Returns:
         Success status or error message
     """
-    client = ctx.request_context.lifespan_context["client"]
+    test_helper = ctx.request_context.lifespan_context["test_helper"]
     
     try:
         logger.info(f"Writing to file: {request.path}")
-        client.write_file(request.path, request.content)
+        test_helper.write_file(request.path, request.content)
         return OperationResponse(success=True)
     except Exception as e:
         logger.error(f"Error writing to file {request.path}: {str(e)}")
@@ -244,11 +262,11 @@ def append_to_file(request: AppendRequest, ctx: Context) -> OperationResponse:
     Returns:
         Success status or error message
     """
-    client = ctx.request_context.lifespan_context["client"]
+    test_helper = ctx.request_context.lifespan_context["test_helper"]
     
     try:
         logger.info(f"Appending to file: {request.path}")
-        client.append_to_file(request.path, request.content, request.create_if_missing)
+        test_helper.append_file(request.path, request.content)
         return OperationResponse(success=True)
     except Exception as e:
         logger.error(f"Error appending to file {request.path}: {str(e)}")
@@ -266,10 +284,20 @@ def list_folder_contents(request: ListFolderRequest, ctx: Context) -> ListFolder
         Directory contents or error message
     """
     client = ctx.request_context.lifespan_context["client"]
+    test_helper = ctx.request_context.lifespan_context["test_helper"]
     
     try:
-        logger.info(f"Listing folder contents: {request.path}")
-        entries_raw = client.list_folder_contents(request.path, request.include_details)
+        # Use test_helper for better path resolution
+        path = request.path
+        # Check if path might be relative to test directory
+        if not os.path.isabs(path) and not path.startswith("data/") and not path.startswith("./data/"):
+            if hasattr(test_helper, "test_files_dir") and test_helper.test_files_dir:
+                test_path = test_helper.test_files_dir / path
+                if test_path.exists():
+                    path = str(test_path)
+        
+        logger.info(f"Listing folder contents: {path}")
+        entries_raw = client.list_folder_contents(path, request.include_details)
         
         # Convert to FolderEntry objects
         entries = []
@@ -306,11 +334,23 @@ def create_folders(request: CreateFoldersRequest, ctx: Context) -> OperationResp
     Returns:
         Success status or error message
     """
-    client = ctx.request_context.lifespan_context["client"]
+    test_helper = ctx.request_context.lifespan_context["test_helper"]
     
     try:
-        logger.info(f"Creating folders: {', '.join(request.paths)}")
-        client.create_folders(request.paths)
+        # Resolve paths for test_helper
+        paths = []
+        for path in request.paths:
+            # If using custom test directory, resolve relative paths
+            if hasattr(test_helper, "test_files_dir") and test_helper.test_files_dir and \
+               not os.path.isabs(path) and not path.startswith("data/") and not path.startswith("./data/"):
+                path = str(test_helper.test_files_dir / path)
+            paths.append(path)
+        
+        logger.info(f"Creating folders: {', '.join(paths)}")
+        test_helper.create_directory(paths[0])  # test_helper's create_directory takes only one path
+        for path in paths[1:]:
+            test_helper.create_directory(path)
+        
         return OperationResponse(success=True)
     except Exception as e:
         logger.error(f"Error creating folders: {str(e)}")
@@ -327,26 +367,51 @@ def search_files(request: SearchFilesRequest, ctx: Context) -> SearchFilesRespon
     Returns:
         Search results or error message
     """
-    client = ctx.request_context.lifespan_context["client"]
+    test_helper = ctx.request_context.lifespan_context["test_helper"]
     
     try:
-        logger.info(f"Searching for pattern '{request.pattern}' in {request.path}")
-        matches_raw = client.search_files(request.pattern, request.path, request.recursive)
+        # Resolve path for test_helper
+        path = request.path
+        if hasattr(test_helper, "test_files_dir") and test_helper.test_files_dir and \
+           not os.path.isabs(path) and not path.startswith("data/") and not path.startswith("./data/"):
+            path = str(test_helper.test_files_dir / path)
         
-        # Convert to structured response
+        logger.info(f"Searching for pattern '{request.pattern}' in {path}")
+        search_result = test_helper.search_files(path, request.pattern)
+        
+        # Parse the formatted string result from test_helper into structured data
         matches = []
-        for match in matches_raw:
+        if "No matches found" not in search_result:
+            # Simple parsing of the text output format
+            current_file = None
             file_matches = []
-            for m in match["matches"]:
-                file_matches.append(FileMatch(
-                    line_number=m["line_number"],
-                    context=m["context"]
-                ))
-                
-            matches.append(SearchMatch(
-                path=match["path"],
-                matches=file_matches
-            ))
+            
+            for line in search_result.splitlines():
+                if line.startswith("File: "):
+                    # Save previous file if there is one
+                    if current_file and file_matches:
+                        matches.append(SearchMatch(path=current_file, matches=file_matches))
+                        file_matches = []
+                    
+                    # Get new file path
+                    current_file = line.replace("File: ", "").strip()
+                    
+                elif line.startswith("Line ") and current_file:
+                    # Extract line number
+                    parts = line.split(":", 1)
+                    if len(parts) == 2:
+                        line_number_str = parts[0].replace("Line ", "").strip()
+                        try:
+                            line_number = int(line_number_str)
+                            # Get context from the next lines
+                            context = parts[1].strip()
+                            file_matches.append(FileMatch(line_number=line_number, context=context))
+                        except ValueError:
+                            pass
+            
+            # Add the last file if there is one
+            if current_file and file_matches:
+                matches.append(SearchMatch(path=current_file, matches=file_matches))
         
         return SearchFilesResponse(matches=matches, success=True)
     except Exception as e:
@@ -364,11 +429,11 @@ def copy_entry(request: CopyEntryRequest, ctx: Context) -> OperationResponse:
     Returns:
         Success status or error message
     """
-    client = ctx.request_context.lifespan_context["client"]
+    test_helper = ctx.request_context.lifespan_context["test_helper"]
     
     try:
         logger.info(f"Copying {request.source_path} to {request.destination_path}")
-        client.copy_entry(request.source_path, request.destination_path, request.overwrite)
+        test_helper.copy_file(request.source_path, request.destination_path)
         return OperationResponse(success=True)
     except Exception as e:
         logger.error(f"Error copying entry: {str(e)}")
@@ -385,11 +450,16 @@ def move_entry(request: MoveEntryRequest, ctx: Context) -> OperationResponse:
     Returns:
         Success status or error message
     """
-    client = ctx.request_context.lifespan_context["client"]
+    test_helper = ctx.request_context.lifespan_context["test_helper"]
     
     try:
         logger.info(f"Moving {request.source_path} to {request.destination_dir}")
-        client.move_entry(request.source_path, request.destination_dir, request.overwrite)
+        # For test_helper.move_file, the second argument should be the full destination path
+        # including filename, not just the destination directory
+        source_filename = os.path.basename(request.source_path)
+        destination_path = os.path.join(request.destination_dir, source_filename)
+        
+        test_helper.move_file(request.source_path, destination_path)
         return OperationResponse(success=True)
     except Exception as e:
         logger.error(f"Error moving entry: {str(e)}")

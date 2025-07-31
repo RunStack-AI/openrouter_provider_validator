@@ -330,20 +330,33 @@ class FileSystemClient:
             print(f"Error loading prompts: {str(e)}")
             return []
     
-    def save_test_results(self, model: str, results: List[TestResult]) -> None:
-        """Save a batch of test results for a model.
+    def save_test_result(self, result: TestResult) -> None:
+        """Save a test result to the appropriate directory.
         
         Args:
-            model: Model identifier
-            results: List of test results
+            result: Test result to save
         """
-        # Create model-specific results directory
-        model_dir = self.base_path / "results" / model.replace("/", "_")
-        model_dir.mkdir(exist_ok=True, parents=True)
+        # Extract necessary components
+        model = result.model
+        prompt_id = result.prompt_id
+        provider = result.provider
         
-        # Save each result in the batch
-        for result in results:
-            # Extract timestamp from ISO format
+        # Clean up components for path safety
+        model_safe = model.replace("/", "_")
+        prompt_id_safe = prompt_id
+        provider_safe = "default" if not provider else provider.replace("/", "_")
+        
+        # Format: results/model/prompt_id/provider/timestamp.json
+        results_dir = self.base_path / "results"
+        model_dir = results_dir / model_safe
+        prompt_dir = model_dir / prompt_id_safe
+        provider_dir = prompt_dir / provider_safe
+        
+        # Ensure all directories exist
+        provider_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Get timestamp
+        if hasattr(result, 'timestamp') and result.timestamp:
             if isinstance(result.timestamp, str):
                 try:
                     dt = datetime.fromisoformat(result.timestamp.replace('Z', '+00:00'))
@@ -351,24 +364,35 @@ class FileSystemClient:
                 except ValueError:
                     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
             else:
-                timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
-            # Generate filename with timestamp
-            filename = f"{result.provider}_{result.prompt_id}_{timestamp_str}.json"
-            result_file = model_dir / filename
-            
-            # Ensure the directory exists (redundant but safe)
-            result_file.parent.mkdir(exist_ok=True, parents=True)
-            
-            # Save as JSON with preprocessing for safe serialization
-            try:
-                with open(result_file, "w") as f:
-                    # Convert to dict, handling datetime objects
-                    result_dict = json.loads(result.json())
-                    json.dump(result_dict, f, indent=2)
-                print(f"Saved test result to {result_file}")
-            except Exception as e:
-                print(f"Error saving test result: {str(e)}")
+                timestamp_str = result.timestamp.strftime("%Y%m%d_%H%M%S")
+        else:
+            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Create the result file
+        result_file = provider_dir / f"{timestamp_str}.json"
+        
+        # Ensure the directory exists (redundant but safe)
+        result_file.parent.mkdir(exist_ok=True, parents=True)
+        
+        # Save as JSON with preprocessing for safe serialization
+        try:
+            with open(result_file, "w") as f:
+                # Convert to dict, handling datetime objects
+                result_dict = json.loads(result.json())
+                json.dump(result_dict, f, indent=2)
+            print(f"Saved test result to {result_file}")
+        except Exception as e:
+            print(f"Error saving test result: {str(e)}")
+    
+    def save_test_results(self, model: str, results: List[TestResult]) -> None:
+        """Save a batch of test results for a model.
+        
+        Args:
+            model: Model identifier
+            results: List of test results
+        """
+        for result in results:
+            self.save_test_result(result)
     
     def load_test_results(self, model: Optional[str] = None) -> List[TestResult]:
         """Load test results, optionally filtered by model.
@@ -384,30 +408,53 @@ class FileSystemClient:
         
         if not results_dir.exists():
             return []
-            
+        
         if model:
-            # Load results for specific model
+            # New structure: results/model/prompt_id/provider/timestamp.json
             model_dir = results_dir / model.replace("/", "_")
             if model_dir.exists() and model_dir.is_dir():
-                for result_file in model_dir.glob("**/*.json"):  # Use recursive glob to find in subdirectories
-                    try:
-                        with open(result_file, "r") as f:
-                            result_data = json.load(f)
-                        results.append(TestResult(**result_data))
-                    except Exception as e:
-                        print(f"Error loading result file {result_file}: {str(e)}")
+                # Search through all prompt directories for this model
+                for prompt_dir in model_dir.iterdir():
+                    if not prompt_dir.is_dir():
+                        continue
+                        
+                    # Search through all provider directories
+                    for provider_dir in prompt_dir.iterdir():
+                        if not provider_dir.is_dir():
+                            continue
+                        
+                        # Load all result files in this provider directory
+                        for result_file in provider_dir.glob("*.json"):
+                            try:
+                                with open(result_file, "r") as f:
+                                    result_data = json.load(f)
+                                # Convert JSON to TestResult object
+                                results.append(TestResult(**result_data))
+                            except Exception as e:
+                                print(f"Error loading result file {result_file}: {str(e)}")
         else:
             # Load results for all models
             for model_dir in results_dir.iterdir():
-                if model_dir.is_dir():
-                    for result_file in model_dir.glob("**/*.json"):  # Use recursive glob
-                        try:
-                            with open(result_file, "r") as f:
-                                result_data = json.load(f)
-                            results.append(TestResult(**result_data))
-                        except Exception as e:
-                            print(f"Error loading result file {result_file}: {str(e)}")
-        
+                if not model_dir.is_dir():
+                    continue
+                    
+                # Process each model directory recursively
+                for prompt_dir in model_dir.iterdir():
+                    if not prompt_dir.is_dir():
+                        continue
+                        
+                    for provider_dir in prompt_dir.iterdir():
+                        if not provider_dir.is_dir():
+                            continue
+                        
+                        for result_file in provider_dir.glob("*.json"):
+                            try:
+                                with open(result_file, "r") as f:
+                                    result_data = json.load(f)
+                                results.append(TestResult(**result_data))
+                            except Exception as e:
+                                print(f"Error loading result file {result_file}: {str(e)}")
+    
         return results
     
     def generate_provider_summary(self, model: str) -> List[ProviderSummary]:

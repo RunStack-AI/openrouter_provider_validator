@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,10 +26,12 @@ from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.messages import ModelMessage, SystemPromptPart, UserPromptPart, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.agent import AgentRunResult
+from pydantic_ai.messages import ModelResponsePart
 
 from client import FileSystemClient
 from filesystem_test_helper import FileSystemTestHelper
 from provider_config import ProviderConfig
+from serialization_helper import json_serializable
 
 # Load environment variables
 load_dotenv()
@@ -72,16 +75,20 @@ class TestResults(TypedDict, total=False):
 class ProviderTester:
     """Test agent for evaluating OpenRouter providers."""
     
-    def __init__(self, model="anthropic/claude-3.7-sonnet", provider=None):
+    def __init__(self, model="anthropic/claude-3.7-sonnet", provider=None, test_files_dir=None):
         """Initialize the tester.
         
         Args:
             model: The model to test
             provider: Specific provider to use (optional)
+            test_files_dir: Directory for test files (optional, provider-specific)
         """
         self.model = model
         self.provider = provider
-        self.test_helper = FileSystemTestHelper()
+        
+        # If test_files_dir is provided, use it; otherwise use default
+        self.test_files_dir = test_files_dir
+        self.test_helper = FileSystemTestHelper(test_files_dir=self.test_files_dir)
         self.test_helper.initialize_test_files()
         
         # Message history tracking
@@ -96,10 +103,10 @@ class ProviderTester:
         # Set up OpenRouter based model
         self.openai_model = None
         
-        # Set up MCP Server environment variables
-        self.mcp_env = {
-            # Add any environment variables needed by the MCP server
-        }
+        # Set up MCP Server environment variables with custom test files path if available
+        self.mcp_env = {}
+        if self.test_files_dir:
+            self.mcp_env["TEST_FILES_DIR"] = str(self.test_files_dir)
         
         # We'll initialize the actual server in the run_test method
         self.mcp_servers = None
@@ -157,13 +164,6 @@ class ProviderTester:
             ),
             settings=model_settings
         )
-        
-        # If provider is specified, add it to the transforms
-        # provider_transforms = None
-        # if self.provider:
-        #     provider_transforms = [{"type": "provider_filter", "providers": [self.provider]}]
-        #     # Add this to the model config
-        #     self.openai_model.default_options["transforms"] = provider_transforms
             
         # Create the agent
         self.agent = Agent(self.openai_model, mcp_servers=self.mcp_servers, system_prompt=system_prompt)
@@ -328,44 +328,26 @@ class ProviderTester:
         # Calculate metrics
         avg_latency = self.total_latency / self.send_count if self.send_count > 0 else 0
         
-        # Extract messages in serializable format (proper handling required)
+        # Extract messages in serializable format using our improved serialization
         serialized_messages = []
+        
         for msg in self.messages:
             try:
-                # Try different serialization methods, with proper error handling
-                if hasattr(msg, 'model_dump'):
-                    # Most modern Pydantic v2 approach
-                    serialized = msg.model_dump()
-                    # Convert datetime objects to strings in ISO format for better JSON serialization
-                    serialized_messages.append(serialized)
-                elif hasattr(msg, 'dict'):
-                    # Older Pydantic approach
-                    serialized = msg.dict()
-                    serialized_messages.append(serialized)
-                elif isinstance(msg, dict):
-                    # Already a dict
-                    serialized_messages.append(msg)
-                else:
-                    # Attempt to serialize based on role/content pattern
-                    serialized_msg = {}
-                    if hasattr(msg, 'role'):
-                        serialized_msg['role'] = msg.role
-                    if hasattr(msg, 'content'):
-                        serialized_msg['content'] = msg.content
-                    if hasattr(msg, 'parts') and isinstance(msg.parts, list):
-                        # Try to serialize parts
-                        parts = []
-                        for part in msg.parts:
-                            if hasattr(part, 'model_dump'):
-                                parts.append(part.model_dump())
-                            elif hasattr(part, 'dict'):
-                                parts.append(part.dict())
-                            elif isinstance(part, dict):
-                                parts.append(part)
-                            else:
-                                parts.append({"content": str(part)})
-                        serialized_msg['parts'] = parts
+                # Create a serializable message object with properly handled parts
+                serialized_msg = {}
+                
+                if hasattr(msg, 'parts') and isinstance(msg.parts, list):
+                    # Handle message parts separately using the helper
+                    parts = []
+                    for part in msg.parts:
+                        # Convert each part to a JSON-serializable dict
+                        part_dict = {"content": json_serializable(part)}
+                        parts.append(part_dict)
+                    serialized_msg['parts'] = parts
                     serialized_messages.append(serialized_msg)
+                else:
+                    # Fallback for messages without parts
+                    serialized_messages.append({"content": str(msg)})
             except Exception as e:
                 # If serialization fails, include a placeholder with error info
                 logger.warning(f"Error serializing message: {e}")
@@ -387,33 +369,43 @@ class ProviderTester:
             }
         }
         
-        # Save result to file
+        # Save result to file with proper directory structure
+        # Format: results/model/prompt_id/provider_variant/timestamp.json
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        result_dir = Path("results")
-        result_dir.mkdir(exist_ok=True)
         
-        # Create a filename-safe version of model and provider for the path
+        # Clean up model, provider, and prompt_id for use in paths
         model_safe = self.model.replace('/', '_')
-        provider_suffix = f"_{self.provider}" if self.provider else ""
+        prompt_id_safe = prompt_id  # Usually already safe but included for clarity
+        provider_variant = "default" if not self.provider else self.provider.replace('/', '_')
         
-        # Handle result directory structure; using nested subdirectories
-        subdir = result_dir / f"{model_safe}_{prompt_id}{provider_suffix}"
-        subdir.mkdir(exist_ok=True, parents=True)
+        # Extract provider name and variant (if any)
+        if "_" in provider_variant and not provider_variant.startswith("_"):
+            # If provider has a variant like "fireworks_fp8"
+            provider_parts = provider_variant.split('_', 1)
+            if len(provider_parts) == 2:
+                provider_variant = f"{provider_parts[0]}_{provider_parts[1]}"
         
-        # Create provider-specific subfolder
-        provider_dir = subdir / (self.provider or 'default')
+        # Set up directory structure
+        result_dir = Path("results")
+        model_dir = result_dir / model_safe
+        prompt_dir = model_dir / prompt_id_safe
+        provider_dir = prompt_dir / provider_variant
+        
+        # Ensure all directories exist
         provider_dir.mkdir(exist_ok=True, parents=True)
         
-        # Final result file path
+        # Create the result file
         result_file = provider_dir / f"{timestamp}.json"
-        
-        # Ensure all parent directories exist
-        result_file.parent.mkdir(exist_ok=True, parents=True)
         
         try:
             with open(result_file, "w") as f:
-                json.dump(result, f, indent=2)
+                json.dump(result, f, indent=2, default=str)
             logger.info(f"Test results saved to {result_file}")
+            
+            # Also save a copy to the client's format for reporting
+            client = FileSystemClient()
+            client.save_test_result(result)
+            
         except Exception as e:
             logger.error(f"Failed to save results file: {e}")
         
@@ -454,6 +446,7 @@ async def main():
     parser.add_argument("--prompt", default="file_operations_sequence", help="Prompt sequence ID to test")
     parser.add_argument("--all", action="store_true", help="Run all prompt sequences")
     parser.add_argument("--list-providers", action="store_true", help="List available providers for the model")
+    parser.add_argument("--test-dir", help="Custom directory for test files")
     args = parser.parse_args()
     
     # Special case: list providers
@@ -461,7 +454,13 @@ async def main():
         await list_providers_for_model(args.model)
         return
     
-    tester = ProviderTester(model=args.model, provider=args.provider)
+    # Create a test directory if specified
+    test_files_dir = None
+    if args.test_dir:
+        test_files_dir = Path(args.test_dir)
+        test_files_dir.mkdir(exist_ok=True, parents=True)
+    
+    tester = ProviderTester(model=args.model, provider=args.provider, test_files_dir=test_files_dir)
     
     # Get provider info to display
     if args.provider:
@@ -486,7 +485,7 @@ async def main():
     
     if args.all:
         # Run all prompt sequences
-        test_helper = FileSystemTestHelper()
+        test_helper = FileSystemTestHelper(test_files_dir=test_files_dir)
         prompts = test_helper.load_prompts()
         for prompt in prompts:
             print(f"\nRunning test: {prompt['id']}")

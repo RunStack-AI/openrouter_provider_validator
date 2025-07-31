@@ -15,14 +15,18 @@ from client import FileSystemClient
 class FileSystemTestHelper:
     """Helper class for filesystem operations in tests."""
     
-    def __init__(self, base_path: str = "."):
+    def __init__(self, base_path: str = ".", test_files_dir: Optional[Path] = None):
         """Initialize the test helper.
         
         Args:
             base_path: Base directory path for all operations
+            test_files_dir: Optional custom directory for test files
         """
         self.base_path = Path(base_path)
         self.filesystem_client = FileSystemClient(base_path)
+        
+        # Use custom test files directory if provided, otherwise use default
+        self.test_files_dir = test_files_dir or (self.base_path / "data/test_files")
         
         # Ensure test directories exist
         self._ensure_directories()
@@ -30,8 +34,8 @@ class FileSystemTestHelper:
     def _ensure_directories(self) -> None:
         """Ensure required test directories exist."""
         test_dirs = [
-            self.base_path / "data/test_files",
-            self.base_path / "data/test_files/nested"
+            self.test_files_dir,
+            self.test_files_dir / "nested"
         ]
         
         for directory in test_dirs:
@@ -40,28 +44,47 @@ class FileSystemTestHelper:
     def initialize_test_files(self) -> None:
         """Initialize or reset test files for a clean test run."""
         # First, clear any existing test files
-        test_files_dir = self.base_path / "data/test_files"
-        if test_files_dir.exists():
+        if self.test_files_dir.exists():
             # Remove all contents but keep the directory
-            for item in test_files_dir.iterdir():
-                if item.is_dir():
+            for item in self.test_files_dir.iterdir():
+                if item.is_dir() and item.name != "nested":  # Preserve the nested directory
                     shutil.rmtree(item)
-                else:
+                elif item.is_file():
                     item.unlink()
         
         # Create nested directory if it doesn't exist
-        nested_dir = test_files_dir / "nested"
+        nested_dir = self.test_files_dir / "nested"
         nested_dir.mkdir(exist_ok=True, parents=True)
         
-        # Create sample files with standard content
-        with open(test_files_dir / "sample1.txt", "w") as f:
-            f.write("This is sample file 1\nIt has multiple lines\nFor testing file reading operations.")
+        # Clear contents of nested directory
+        for item in nested_dir.iterdir():
+            if item.is_file():
+                item.unlink()
         
-        with open(test_files_dir / "sample2.txt", "w") as f:
-            f.write("Sample file 2 contains different content\nUseful for testing searching functionality.")
-        
-        with open(nested_dir / "sample3.txt", "w") as f:
-            f.write("This is a nested file\nLocated in a subdirectory\nFor testing nested path operations.")
+        # Check if we have a templates directory to copy from
+        templates_dir = self.base_path / "data/test_files/templates"
+        if templates_dir.exists() and templates_dir.is_dir():
+            # Copy templates instead of creating hardcoded files
+            for template_file in templates_dir.glob("**/*"):
+                if template_file.is_file():
+                    # Construct the relative path from templates_dir
+                    rel_path = template_file.relative_to(templates_dir)
+                    # Construct destination path in test_files_dir
+                    dest_file = self.test_files_dir / rel_path
+                    # Create parent directories if needed
+                    dest_file.parent.mkdir(exist_ok=True, parents=True)
+                    # Copy the template file
+                    shutil.copy2(template_file, dest_file)
+        else:
+            # Create standard sample files if no templates exist
+            with open(self.test_files_dir / "sample1.txt", "w") as f:
+                f.write("This is sample file 1\nIt has multiple lines\nFor testing file reading operations.")
+            
+            with open(self.test_files_dir / "sample2.txt", "w") as f:
+                f.write("Sample file 2 contains different content\nUseful for testing searching functionality.")
+            
+            with open(nested_dir / "sample3.txt", "w") as f:
+                f.write("This is a nested file\nLocated in a subdirectory\nFor testing nested path operations.")
     
     def load_prompts(self, filepath: str = "data/prompts.json") -> List[Dict[str, Any]]:
         """Load all test prompts.
@@ -104,6 +127,14 @@ class FileSystemTestHelper:
             Formatted list of files as a string
         """
         try:
+            # If directory is a relative path within the test files directory structure,
+            # resolve it against the test_files_dir
+            if not os.path.isabs(directory) and not directory.startswith("data/") and not directory.startswith("./data/"):
+                # Check if it might be a path relative to test_files_dir
+                test_relative_path = self.test_files_dir / directory
+                if test_relative_path.exists():
+                    directory = str(test_relative_path)
+            
             entries = self.filesystem_client.list_folder_contents(directory)
             result = []
             result.append(f"Contents of {directory}:")
@@ -126,6 +157,12 @@ class FileSystemTestHelper:
             File content as a string
         """
         try:
+            # Check if file_path is relative to test_files_dir
+            if not os.path.isabs(file_path) and not file_path.startswith("data/") and not file_path.startswith("./data/"):
+                test_relative_path = self.test_files_dir / file_path
+                if test_relative_path.exists():
+                    file_path = str(test_relative_path)
+                    
             return self.filesystem_client.read_file(file_path)
         except Exception as e:
             return f"Error reading file {file_path}: {str(e)}"
@@ -141,6 +178,10 @@ class FileSystemTestHelper:
             True if successful
         """
         try:
+            # Resolve path against test_files_dir if it's a relative path
+            if not os.path.isabs(file_path) and not file_path.startswith("data/") and not file_path.startswith("./data/"):
+                file_path = str(self.test_files_dir / file_path)
+                
             return self.filesystem_client.write_file(file_path, content)
         except Exception as e:
             raise ValueError(f"Error writing to file {file_path}: {str(e)}")
@@ -156,6 +197,10 @@ class FileSystemTestHelper:
             True if successful
         """
         try:
+            # Resolve path against test_files_dir if it's a relative path
+            if not os.path.isabs(file_path) and not file_path.startswith("data/") and not file_path.startswith("./data/"):
+                file_path = str(self.test_files_dir / file_path)
+                
             return self.filesystem_client.append_to_file(file_path, content, create_if_missing=True)
         except Exception as e:
             raise ValueError(f"Error appending to file {file_path}: {str(e)}")
@@ -170,6 +215,10 @@ class FileSystemTestHelper:
             True if successful
         """
         try:
+            # Resolve path against test_files_dir if it's a relative path
+            if not os.path.isabs(directory) and not directory.startswith("data/") and not directory.startswith("./data/"):
+                directory = str(self.test_files_dir / directory)
+                
             return self.filesystem_client.create_folders([directory])
         except Exception as e:
             raise ValueError(f"Error creating directory {directory}: {str(e)}")
@@ -185,6 +234,13 @@ class FileSystemTestHelper:
             True if successful
         """
         try:
+            # Resolve paths against test_files_dir if they are relative paths
+            if not os.path.isabs(source) and not source.startswith("data/") and not source.startswith("./data/"):
+                source = str(self.test_files_dir / source)
+            
+            if not os.path.isabs(destination) and not destination.startswith("data/") and not destination.startswith("./data/"):
+                destination = str(self.test_files_dir / destination)
+                
             return self.filesystem_client.copy_entry(source, destination)
         except Exception as e:
             raise ValueError(f"Error copying file from {source} to {destination}: {str(e)}")
@@ -200,6 +256,13 @@ class FileSystemTestHelper:
             True if successful
         """
         try:
+            # Resolve paths against test_files_dir if they are relative paths
+            if not os.path.isabs(source) and not source.startswith("data/") and not source.startswith("./data/"):
+                source = str(self.test_files_dir / source)
+            
+            if not os.path.isabs(destination) and not destination.startswith("data/") and not destination.startswith("./data/"):
+                destination = str(self.test_files_dir / destination)
+            
             # The move_entry method expects a destination directory, not file
             dest_dir = os.path.dirname(destination)
             if not os.path.exists(dest_dir):
@@ -221,6 +284,10 @@ class FileSystemTestHelper:
             Formatted string with search results
         """
         try:
+            # Resolve path against test_files_dir if it's a relative path
+            if not os.path.isabs(directory) and not directory.startswith("data/") and not directory.startswith("./data/"):
+                directory = str(self.test_files_dir / directory)
+                
             results = self.filesystem_client.search_files(pattern, directory)
             
             if not results:

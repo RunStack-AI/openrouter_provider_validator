@@ -1,0 +1,2 @@
+Sample file 2 contains different content
+Useful for testing searching functionality.
