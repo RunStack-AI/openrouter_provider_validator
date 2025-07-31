@@ -328,21 +328,48 @@ class ProviderTester:
         # Calculate metrics
         avg_latency = self.total_latency / self.send_count if self.send_count > 0 else 0
         
-        # Extract messages in serializable format
+        # Extract messages in serializable format (proper handling required)
         serialized_messages = []
         for msg in self.messages:
-            if hasattr(msg, 'dict'):
-                serialized_messages.append(msg.dict())
-            elif hasattr(msg, 'model_dump'):
-                serialized_messages.append(msg.model_dump())
-            else:
-                # Attempt to serialize based on role/content pattern
-                serialized_msg = {}
-                if hasattr(msg, 'role'):
-                    serialized_msg['role'] = msg.role
-                if hasattr(msg, 'content'):
-                    serialized_msg['content'] = msg.content
-                serialized_messages.append(serialized_msg)
+            try:
+                # Try different serialization methods, with proper error handling
+                if hasattr(msg, 'model_dump'):
+                    # Most modern Pydantic v2 approach
+                    serialized = msg.model_dump()
+                    # Convert datetime objects to strings in ISO format for better JSON serialization
+                    serialized_messages.append(serialized)
+                elif hasattr(msg, 'dict'):
+                    # Older Pydantic approach
+                    serialized = msg.dict()
+                    serialized_messages.append(serialized)
+                elif isinstance(msg, dict):
+                    # Already a dict
+                    serialized_messages.append(msg)
+                else:
+                    # Attempt to serialize based on role/content pattern
+                    serialized_msg = {}
+                    if hasattr(msg, 'role'):
+                        serialized_msg['role'] = msg.role
+                    if hasattr(msg, 'content'):
+                        serialized_msg['content'] = msg.content
+                    if hasattr(msg, 'parts') and isinstance(msg.parts, list):
+                        # Try to serialize parts
+                        parts = []
+                        for part in msg.parts:
+                            if hasattr(part, 'model_dump'):
+                                parts.append(part.model_dump())
+                            elif hasattr(part, 'dict'):
+                                parts.append(part.dict())
+                            elif isinstance(part, dict):
+                                parts.append(part)
+                            else:
+                                parts.append({"content": str(part)})
+                        serialized_msg['parts'] = parts
+                    serialized_messages.append(serialized_msg)
+            except Exception as e:
+                # If serialization fails, include a placeholder with error info
+                logger.warning(f"Error serializing message: {e}")
+                serialized_messages.append({"error": f"Failed to serialize message: {str(e)}"})
         
         # Save test results
         result = {
@@ -369,16 +396,16 @@ class ProviderTester:
         model_safe = self.model.replace('/', '_')
         provider_suffix = f"_{self.provider}" if self.provider else ""
         
-        # Determine file path; handle both nested and flat formats
-        if '/' in self.model or '\\' in self.model or result_dir.is_dir():
-            # If we need a subdirectory approach (error suggests this)
-            subdir = result_dir / f"{model_safe}_{prompt_id}{provider_suffix}"
-            subdir.mkdir(exist_ok=True, parents=True)
-            result_file = subdir / f"{self.provider or 'default'}_{timestamp}.json"
-            logger.info(f"Saving results to subdirectory: {subdir}")
-        else:
-            # Flat approach for backward compatibility
-            result_file = result_dir / f"{model_safe}_{prompt_id}{provider_suffix}_{timestamp}.json"
+        # Handle result directory structure; using nested subdirectories
+        subdir = result_dir / f"{model_safe}_{prompt_id}{provider_suffix}"
+        subdir.mkdir(exist_ok=True, parents=True)
+        
+        # Create provider-specific subfolder
+        provider_dir = subdir / (self.provider or 'default')
+        provider_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Final result file path
+        result_file = provider_dir / f"{timestamp}.json"
         
         # Ensure all parent directories exist
         result_file.parent.mkdir(exist_ok=True, parents=True)
