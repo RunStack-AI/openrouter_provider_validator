@@ -1,0 +1,429 @@
+#!/usr/bin/env python
+"""Test agent for a LLM Provider Validator."""
+
+import asyncio
+import json
+import logging
+import os
+import random
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any, Union, Callable
+import pkg_resources
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from client import FileSystemClient, TestResult
+from openrouter_client import OpenRouterClient
+from provider_config import ProviderConfig
+
+# Configure logging
+logging_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+logging.basicConfig(
+    level=logging.INFO,
+    format=logging_format,
+    handlers=[
+        logging.StreamHandler(),
+    ]
+)
+
+logger = logging.getLogger("validator-tester")
+
+# Create log directory if it doesn't exist
+log_dir = Path("logs")
+log_dir.mkdir(exist_ok=True)
+
+# Add file handler to logger
+file_handler = logging.FileHandler(
+    log_dir / f"validator_tester_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+)
+file_handler.setFormatter(logging.Formatter(logging_format))
+logger.addHandler(file_handler)
+
+
+class ProviderTester:
+    """Test harness for validating LLM Providers."""
+    
+    def __init__(
+        self,
+        model: str,
+        provider: Optional[str] = None,
+        temperature: float = 0.0,
+        result_dir: str = "results",
+        test_files_dir: Optional[Union[str, Path]] = None,
+        prompts_dir: str = "prompts"
+    ):
+        """Initialize the tester.
+        
+        Args:
+            model: Model identifier
+            provider: Provider name (if None, will use default)
+            temperature: Temperature for generation
+            result_dir: Directory to save results
+            test_files_dir: Directory containing test files
+            prompts_dir: Directory containing prompt sequences
+        """
+        self.model = model
+        self.provider = provider
+        self.temperature = temperature
+        self.result_dir = Path(result_dir)
+        self.prompts_dir = Path(prompts_dir)
+        self.provider_args = {}
+        
+        # Create results directory if it doesn't exist
+        self.result_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Set up test files directory. Defaults to a directory named after the provider_id
+        if test_files_dir is None:
+            provider_safe = "default" if not provider else provider.replace("/", "_")
+            model_safe = model.replace("/", "_")
+            self.test_files_dir = Path("data/test_files") / f"{model_safe}_{provider_safe}"
+        else:
+            self.test_files_dir = Path(test_files_dir)
+            
+        # Create test files directory if it doesn't exist
+        self.test_files_dir.mkdir(exist_ok=True, parents=True)
+        logger.info(f"Using test files in {self.test_files_dir}")
+        
+        # Initialize metrics
+        self.tool_calls_count = 0
+        self.send_count = 0
+        self.response_times = []
+    
+    def load_prompt_sequence(self, prompt_id: str) -> Dict:
+        """Load a prompt sequence from a JSON file.
+        
+        Args:
+            prompt_id: ID of the prompt sequence to load
+            
+        Returns:
+            Prompt sequence dictionary
+        """
+        prompt_file = self.prompts_dir / f"{prompt_id}.json"  
+        
+        if not prompt_file.exists():
+            raise ValueError(f"Prompt sequence {prompt_id} not found at {prompt_file}")
+            
+        try:
+            with open(prompt_file, "r") as f:
+                prompt_sequence = json.load(f)
+            return prompt_sequence
+        except Exception as e:
+            logger.error(f"Error loading prompt sequence {prompt_id}: {e}")
+            raise
+    
+    async def send_message(self, message: str) -> Tuple[Dict, float]:
+        """Send a message to the provider and track metrics.
+        
+        Args:
+            message: Message to send
+            
+        Returns:
+            Tuple of (response, latency in ms)
+        """
+        client = OpenRouterClient()
+        self.send_count += 1
+        
+        start_time = time.time()
+        response = await client.chat(
+            model=self.model,
+            provider=self.provider,
+            messages=[{"role": "user", "content": message}],
+            temperature=self.temperature,
+            **self.provider_args
+        )
+        end_time = time.time()
+        latency_ms = int((end_time - start_time) * 1000)
+        self.response_times.append(latency_ms)
+        
+        if response.get("status") == "error":
+            error_msg = response.get("error", {}).get("message", "Unknown error")
+            logger.error(f"Error from provider: {error_msg}")
+            raise Exception(f"Provider error: {error_msg}")
+        
+        # Check for and count tool calls
+        if "choices" in response and response["choices"]:
+            if message in response["choices"][0].get("message", {}).get("tool_calls", []):
+                self.tool_calls_count += 1
+                
+        return response, latency_ms
+    
+    def filtered_message_history(self, result: Dict, limit: int = 4) -> List[Dict]:
+        """Get a filtered message history from a test result.
+        
+        Args:
+            result: Test result dictionary
+            limit: Maximum number of messages to include
+            
+        Returns:
+            List of messages to include in history
+        """
+        if "messages" not in result or not result["messages"]:
+            return []
+            
+        return result["messages"][-limit:] if len(result["messages"]) > limit else result["messages"]
+    
+    async def run(self, message: str, **kwargs) -> Dict:
+        """Run a test with a message.
+        
+        Args:
+            message: Message to send
+            **kwargs: Additional arguments for the provider
+            
+        Returns:
+            Test result dictionary
+        """
+        # Add any additional arguments
+        self.provider_args.update(kwargs)
+        
+        # Run the agent
+        try:
+            agent_result = await self.agent.run(
+                message,
+                message_history=self.filtered_message_history(result, limit=24)
+            )
+            return agent_result
+        except Exception as e:
+            logger.error(f"Error running agent: {e}")
+            return {"error": str(e)}
+    
+    def get_test_file_path(self, filename: str) -> Path:
+        """Get the path to a test file.
+        
+        Args:
+            filename: Name of the test file
+            
+        Returns:
+            Path to the test file
+        """
+        return self.test_files_dir / filename
+    
+    async def load_test_file(self, filename: str) -> str:
+        """Load a test file.
+        
+        Args:
+            filename: Name of the test file
+            
+        Returns:
+            Content of the test file
+        """
+        file_path = self.get_test_file_path(filename)  
+        if not file_path.exists():
+            raise ValueError(f"Test file {filename} not found at {file_path}")
+            
+        try:
+            with open(file_path, "r") as f:
+                content = f.read()
+            return content
+        except Exception as e:
+            logger.error(f"Error loading test file {filename}: {e}")
+            raise
+    
+    async def save_test_file(self, filename: str, content: str) -> None:
+        """Save a test file.
+        
+        Args:
+            filename: Name of the test file
+            content: Content to write to the file
+        """
+        file_path = self.get_test_file_path(filename)
+        file_path.parent.mkdir(exist_ok=True, parents=True)
+            
+        try:
+            with open(file_path, "w") as f:
+                f.write(content)
+            logger.info(f"Saved test file {filename}")
+        except Exception as e:
+            logger.error(f"Error saving test file {filename}: {e}")
+            raise
+    
+    async def run_test(self, prompt_id: str) -> TestResult:
+        """Run a test using a prompt sequence.
+        
+        Args:
+            prompt_id: ID of the prompt sequence to use
+            
+        Returns:
+            Test result object
+        """
+        # Load the prompt sequence
+        prompt_sequence = self.load_prompt_sequence(prompt_id)
+        
+        if "sequence" not in prompt_sequence or not prompt_sequence["sequence"]:
+            raise ValueError(f"Prompt sequence {prompt_id} has no steps")
+        
+        # Reset metrics for this test
+        self.tool_calls_count = 0
+        self.send_count = 0
+        self.response_times = []
+        
+        # Store messages for the test result
+        serialized_messages = []
+        
+        # Run each step in the sequence through the agent
+        successful_steps = 0
+        previous_result = None
+        
+        # Start the MCP servers
+        logger.info(f"Running prompt sequence: {prompt_id}")
+        
+        for step in prompt_sequence["sequence"]:
+            prompt_template = step["prompt"]
+            logger.info(f"Step prompt: {prompt_template[:100]}...")
+            
+            # Load any test files referenced in the template
+            for i in range(10):  # Support up to 10 test files
+                file_placeholder = f"{{{{test_file{i}}}}}" if i > 0 else "{{test_file}}"
+                file_key = f"test_file{i}" if i > 0 else "test_file"
+                
+                if file_placeholder in prompt_template and file_key in step:
+                    # Load the file
+                    try:
+                        file_content = await self.load_test_file(step[file_key])
+                        prompt_template = prompt_template.replace(file_placeholder, file_content)
+                    except Exception as e:
+                        logger.error(f"Error loading test file: {e}")
+                        break
+            
+            # Send the prompt to the provider
+            try:
+                response, latency = await self.send_message(prompt_template)
+                if serialized_messages:
+                    serialized_messages.append({"content": prompt_template})
+                previous_result = response.get("result")
+                successful_steps += 1
+            except Exception as e:
+                logger.error(f"Error in step {len(serialized_messages)+1}: {e}")
+                # Add the error to the messages
+                serialized_messages.append({"content": prompt_template})
+                serialized_messages.append({"error": str(e)})
+                break
+            
+            # Add the response to the messages
+            try:
+                if "choices" in response and response["choices"]:
+                    message_content = response["choices"][0].get("message", {}).get("content", "") 
+                    serialized_messages.append({"content": message_content})
+                else:
+                    # If the response doesn't have the expected structure, add the raw response
+                    serialized_messages.append({"content": str(response)})
+            except Exception as e:
+                logger.error(f"Error processing response: {e}")
+                serialized_messages.append({"error": f"Error processing response: {str(e)}"})
+                break
+        
+        # Calculate average latency
+        avg_latency = sum(self.response_times) / len(self.response_times) if self.response_times else 0
+        
+        # Serialize messages, handling potential issues
+        for i, msg in enumerate(serialized_messages):
+            try:
+                # Make sure each message is properly serialized
+                if not isinstance(msg, dict):
+                    serialized_messages[i] = {"content": str(msg)}
+            except Exception as e:
+                # If serialization fails, include a placeholder with error info
+                logger.warning(f"Error serializing message: {e}")
+                serialized_messages[i] = {"error": f"Failed to serialize message: {str(e)}"}
+        
+        # Create metrics dictionary including extra fields that don't fit in TestResult
+        metrics = {
+            "total_tool_calls": self.tool_calls_count,
+            "total_send_count": self.send_count,
+            "latency_ms": avg_latency,
+            "total_steps": len(prompt_sequence["sequence"]),
+            "successful_steps": successful_steps,
+            "messages": serialized_messages
+        }
+        
+        # Create TestResult object
+        result = TestResult(
+            model=self.model,
+            provider=self.provider or "unknown",
+            prompt_id=prompt_id,
+            success=successful_steps == len(prompt_sequence["sequence"]),
+            metrics=metrics,
+            timestamp=datetime.now().isoformat()
+        )
+        
+        # Save result to file with proper directory structure
+        # Format: results/model/prompt_id/provider_variant/timestamp.json
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Clean up model, provider, and prompt_id for use in paths
+        model_safe = self.model.replace('/', '_')
+        prompt_id_safe = prompt_id  # Usually already safe but included for clarity
+        provider_variant = "default" if not self.provider else self.provider.replace('/', '_')
+        
+        result_dir = Path("results")
+        model_dir = result_dir / model_safe
+        prompt_dir = model_dir / prompt_id_safe
+        provider_dir = prompt_dir / provider_variant
+        
+        # Ensure all directories exist
+        provider_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Create the result file
+        result_file = provider_dir / f"{timestamp}.json"
+        
+        try:
+            with open(result_file, "w") as f:
+                # Convert result to dict for saving with proper serialization
+                result_dict = json.loads(result.json())
+                json.dump(result_dict, f, indent=2, default=str)
+            logger.info(f"Test results saved to {result_file}")
+            
+            # Also save a copy to the client's format for reporting
+            client = FileSystemClient()
+            client.save_test_result(result)
+            
+        except Exception as e:
+            logger.error(f"Failed to save results file: {e}")
+        
+        return result
+
+async def list_providers_for_model(model: str):
+    """List all available providers for a model.
+    
+    Args:
+        model: Model identifier
+    """
+    providers = await ProviderConfig.find_providers_for_model(model, enabled_only=False)
+    return providers
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Test a LLM Provider.")
+    parser.add_argument("--model", type=str, default="anthropic/claude-3.7-sonnet", help="Model identifier")
+    parser.add_argument("--provider", type=str, help="Provider name (optional)")
+    parser.add_argument("--prompt", type=str, default="function_call_test", help="Prompt sequence ID")
+    parser.add_argument("--temperature", type=float, default=0.0, help="Temperature for generation")
+    
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    import argparse
+    
+    args = parse_args()
+    
+    # Create tester instance
+    tester = ProviderTester(
+        model=args.model,
+        provider=args.provider,
+        temperature=args.temperature
+    )
+    
+    # Create an asyncio event loop
+    loop = asyncio.get_event_loop()
+    
+    try:
+        # Run a simple test
+        result = loop.run_until_complete(tester.run_test(args.prompt))
+        print(f"Test completed: {result.success}")
+    except Exception as e:
+        logger.error(f"Error running test: {e}")
+        raise
+    finally:
+        loop.close()

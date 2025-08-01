@@ -226,6 +226,27 @@ class ProviderTester:
             # Extract all messages including tool calls
             all_messages = agent_result.all_messages()
             
+            # Look for validation errors in the response
+            validation_errors = []
+            for msg in all_messages:
+                for part in msg.parts:
+                    if isinstance(part, ToolReturnPart) and "Error executing tool" in part.content:
+                        error_content = str(part.content).lower()
+                        if any(pattern in error_content for pattern in [
+                            "validation error", 
+                            "errors.pydantic.dev", 
+                            "type=model_type", 
+                            "type=value_error", 
+                            "type=type_error", 
+                            "field required", 
+                            "input should be"
+                        ]):
+                            validation_errors.append({
+                                "message": part.content,
+                                "tool": part.tool_name if hasattr(part, 'tool_name') else "unknown",
+                                "timestamp": datetime.now().isoformat()
+                            })
+            
             # Count tool calls
             for msg in all_messages:
                 for part in msg.parts:
@@ -249,7 +270,8 @@ class ProviderTester:
                 "result": agent_result,
                 "output": agent_result.output,
                 "messages": all_messages,
-                "latency_ms": latency
+                "latency_ms": latency,
+                "validation_errors": validation_errors
             }
             
         except Exception as e:
@@ -257,7 +279,8 @@ class ProviderTester:
             return {
                 "error": str(e),
                 "messages": [],
-                "latency_ms": 0
+                "latency_ms": 0,
+                "validation_errors": []
             }
     
     async def run_test(self, prompt_id: str = "file_operations_sequence") -> TestResult:
@@ -294,6 +317,7 @@ class ProviderTester:
                 provider=self.provider or "unknown",
                 prompt_id=prompt_id,
                 success=False,
+                perfect_success=False,
                 timestamp=datetime.now().isoformat(),
                 metrics={
                     "total_tool_calls": 0,
@@ -309,6 +333,7 @@ class ProviderTester:
         # Run each step in the sequence through the agent
         successful_steps = 0
         previous_result = None
+        all_validation_errors = []
         
         # Start the MCP servers
         async with self.agent.run_mcp_servers():
@@ -319,6 +344,11 @@ class ProviderTester:
                     if "error" in response:
                         logger.error(f"Error in step {i+1}: {response['error']}")
                         break
+                    
+                    # Accumulate validation errors
+                    if "validation_errors" in response and response["validation_errors"]:
+                        all_validation_errors.extend(response["validation_errors"])
+                        logger.warning(f"Step {i+1} had {len(response['validation_errors'])} validation errors")
                     
                     previous_result = response.get("result")
                     successful_steps += 1
@@ -370,6 +400,9 @@ class ProviderTester:
             provider=self.provider or "unknown",
             prompt_id=prompt_id,
             success=successful_steps == len(prompt_sequence["sequence"]),
+            perfect_success=successful_steps == len(prompt_sequence["sequence"]) and len(all_validation_errors) == 0,
+            validation_errors=all_validation_errors,
+            validation_error_count=len(all_validation_errors),
             metrics=metrics,
             timestamp=datetime.now().isoformat()
         )
@@ -412,6 +445,10 @@ class ProviderTester:
             # Also save a copy to the client's format for reporting
             client = FileSystemClient()
             client.save_test_result(result)
+            
+            # Log validation error info if present
+            if all_validation_errors:
+                logger.warning(f"Test completed with {len(all_validation_errors)} validation errors")
             
         except Exception as e:
             logger.error(f"Failed to save results file: {e}")

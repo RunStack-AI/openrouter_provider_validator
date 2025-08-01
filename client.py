@@ -17,7 +17,10 @@ class TestResult(BaseModel):
     provider: str = Field(description="Provider name")
     model: str = Field(description="Model used")
     prompt_id: str = Field(description="Prompt identifier")
-    success: bool = Field(description="Whether test succeeded")
+    success: bool = Field(description="Whether test succeeded all steps")
+    perfect_success: bool = Field(default=True, description="Whether test succeeded with no validation errors")
+    validation_errors: List[Dict[str, Any]] = Field(default_factory=list, description="List of validation errors encountered")
+    validation_error_count: int = Field(default=0, description="Count of validation errors")
     response_data: Optional[Dict[str, Any]] = Field(default=None, description="Full response data")
     token_usage: Optional[Dict[str, int]] = Field(default=None, description="Token usage statistics")
     error_message: Optional[str] = Field(default=None, description="Error message if failed")
@@ -32,6 +35,8 @@ class ProviderSummary(BaseModel):
     model: str = Field(description="Model identifier")
     total_attempts: int = Field(description="Total test attempts")
     successful_attempts: int = Field(description="Successful attempts")
+    perfect_attempts: int = Field(default=0, description="Successful attempts with no validation errors")
+    validation_errors: int = Field(default=0, description="Total validation errors across all tests")
     failure_rate: float = Field(description="Failure rate as percentage")
     error_categories: Dict[str, int] = Field(description="Error counts by category")
     avg_response_time: Optional[float] = Field(default=None, description="Average response time in ms")
@@ -475,6 +480,8 @@ class FileSystemClient:
                 provider_stats[provider] = {
                     "total_attempts": 0,
                     "successful_attempts": 0,
+                    "perfect_attempts": 0,
+                    "validation_errors": 0,
                     "error_categories": {},
                     "response_times": []
                 }
@@ -483,6 +490,13 @@ class FileSystemClient:
             
             if result.success:
                 provider_stats[provider]["successful_attempts"] += 1
+                
+                # Track perfect attempts
+                if getattr(result, "perfect_success", True):
+                    provider_stats[provider]["perfect_attempts"] += 1
+                
+                # Track validation errors
+                provider_stats[provider]["validation_errors"] += getattr(result, "validation_error_count", 0)
                 
                 # Track response times from successful requests
                 if result.metrics and "latency_ms" in result.metrics:
@@ -511,6 +525,8 @@ class FileSystemClient:
                 model=model,
                 total_attempts=stats["total_attempts"],
                 successful_attempts=stats["successful_attempts"],
+                perfect_attempts=stats["perfect_attempts"],
+                validation_errors=stats["validation_errors"],
                 failure_rate=failure_rate,
                 error_categories=stats["error_categories"],
                 avg_response_time=avg_response_time
@@ -581,7 +597,9 @@ class FileSystemClient:
         enabled_providers = sum(1 for p in providers if p.get("enabled", True))
         
         successful_tests = len([r for r in all_results if r.success])
+        perfect_tests = len([r for r in all_results if getattr(r, "perfect_success", False)])
         failed_tests = len([r for r in all_results if not r.success])
+        validation_errors = sum(getattr(r, "validation_error_count", 0) for r in all_results)
         
         return {
             "total_providers": len(providers),
@@ -590,5 +608,7 @@ class FileSystemClient:
             "models_tested": len(models),
             "total_test_results": len(all_results),
             "successful_tests": successful_tests,
-            "failed_tests": failed_tests
+            "perfect_tests": perfect_tests,
+            "failed_tests": failed_tests,
+            "validation_errors": validation_errors
         }

@@ -1,265 +1,190 @@
-"""OpenRouter Provider Validator - Report Generator
+"""OpenRouter Provider Validator - Validation Error Report Generator
 
-Creates human-readable reports from test results.
+Generates specialized reports focused on validation errors.
 """
 
 import json
-from datetime import datetime
+import os
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from datetime import datetime
+from typing import Dict, List, Optional, Any
 
-from client import FileSystemClient, ProviderSummary, TestResult
-from metrics_extractor import extract_metrics_from_test_results
+from client import FileSystemClient
 
-# Initialize client
-client = FileSystemClient()
-
-def generate_provider_report(provider_name: str, model_name: str) -> str:
-    """Generate a report for a specific provider and model combination.
+def generate_validation_error_report(client, models=None, batch_timestamp=None):
+    """Generate a report focused on validation errors across models and providers.
     
     Args:
-        provider_name: Name of the provider to report on
-        model_name: Model identifier
+        client: FileSystemClient instance
+        models: Optional list of models to include
+        batch_timestamp: Optional timestamp for the report filename
         
     Returns:
-        Markdown formatted report content
+        Report content as string
     """
-    # Load test results for this model
-    results = client.load_test_results(model_name)
+    if not models:
+        models = client.list_models()
     
-    # Filter to only this provider
-    provider_results = [r for r in results if r.provider == provider_name]
+    if not batch_timestamp:
+        batch_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    if not provider_results:
-        return f"# {provider_name} Provider Report for {model_name}\n\nNo test results found for this provider/model combination.\n"
-    
-    # Extract metrics
-    metrics = extract_metrics_from_test_results(provider_results)
-    
-    # Build the report
     report = []
-    report.append(f"# {provider_name} Provider Report for {model_name}\n")
-    report.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    report.append("# Validation Error Analysis Report\n")
+    report.append("This report analyzes validation errors that occurred during test executions, including those in otherwise successful tests.\n\n")
     
-    # Summary section
-    report.append("## Summary\n")
-    report.append(f"- Total Tests: {metrics['total_tests']}\n")
-    report.append(f"- Successful Tests: {metrics['successful_tests']} ({metrics['success_rate']:.2f}%)\n")
-    report.append(f"- Failed Tests: {metrics['failed_tests']}\n")
-    report.append(f"- Total Tokens Used: {metrics['total_tokens_used']}\n")
+    total_tests = 0
+    tests_with_validation_errors = 0
+    perfect_success_tests = 0
+    total_validation_errors = 0
     
-    # Token usage section
-    report.append("## Token Usage\n")
-    report.append(f"- Average Total Tokens: {metrics['avg_total_tokens']:.2f}\n")
-    report.append(f"- Average Prompt Tokens: {metrics['avg_prompt_tokens']:.2f}\n")
-    report.append(f"- Average Completion Tokens: {metrics['avg_completion_tokens']:.2f}\n")
+    # Common validation error patterns
+    error_patterns = {}
+    model_validation_stats = {}
     
-    # Error analysis section
-    if metrics['failed_tests'] > 0:
-        report.append("## Error Analysis\n")
-        report.append("### Error Categories\n")
-        for category, count in metrics['error_categories'].items():
-            report.append(f"- {category}: {count} ({(count / metrics['failed_tests'] * 100):.2f}%)\n")
+    for model in models:
+        results = client.load_test_results(model)
+        model_tests = len(results)
+        model_errors = 0
+        model_perfect = 0
+        provider_stats = {}
         
-        # Sample error messages
-        report.append("\n### Sample Error Messages\n")
-        error_samples = [r for r in provider_results if not r.success][:5]  # Up to 5 samples
-        for sample in error_samples:
-            report.append(f"- **Prompt ID**: {sample.prompt_id}\n")
-            report.append(f"  **Error**: {sample.error_message}\n")
-            report.append(f"  **Category**: {sample.error_category or 'unknown'}\n\n")
-    
-    # Tool usage section
-    if metrics['tool_usage']:
-        report.append("## Tool Usage\n")
-        for tool, count in sorted(metrics['tool_usage'].items(), key=lambda x: x[1], reverse=True):
-            report.append(f"- {tool}: {count} calls\n")
-    
-    return "".join(report)
-
-def generate_model_comparison_report(model_name: str) -> str:
-    """Generate a comparison report across all providers for a specific model.
-    
-    Args:
-        model_name: Model identifier to compare providers for
-        
-    Returns:
-        Markdown formatted report content
-    """
-    # Get summaries for all providers of this model
-    summaries = client.generate_provider_summary(model_name)
-    
-    if not summaries:
-        return f"# Provider Comparison for {model_name}\n\nNo test results found for this model.\n"
-    
-    # Sort by success rate
-    summaries.sort(key=lambda x: x.failure_rate)
-    
-    # Build the report
-    report = []
-    report.append(f"# Provider Comparison for {model_name}\n")
-    report.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-    
-    # Summary table
-    report.append("## Provider Performance\n")
-    report.append("| Provider | Attempts | Success | Failure Rate | Main Error Types |\n")
-    report.append("| --- | --- | --- | --- | --- |\n")
-    
-    for summary in summaries:
-        # Format error categories
-        error_types = ", ".join([f"{k} ({v})" for k, v in summary.error_categories.items()])
-        error_types = error_types if error_types else "None"
-        
-        report.append(f"| {summary.provider} | {summary.total_attempts} | {summary.successful_attempts} | "
-                   f"{summary.failure_rate:.2f}% | {error_types} |\n")
-    
-    return "".join(report)
-
-def generate_summary_report() -> str:
-    """Generate an overall summary report for all test results.
-    
-    Returns:
-        Markdown formatted report content
-    """
-    # Get system stats
-    stats = client.get_stats()
-    
-    # Get all model names
-    models = client.list_models()
-    
-    # Build the report
-    report = []
-    report.append(f"# OpenRouter Provider Validator Summary Report\n")
-    report.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-    
-    # System stats section
-    report.append("## System Statistics\n")
-    report.append(f"- Total Providers: {stats['total_providers']}\n")
-    report.append(f"- Enabled Providers: {stats['enabled_providers']}\n")
-    report.append(f"- Total Test Prompts: {stats['total_prompts']}\n")
-    report.append(f"- Models Tested: {stats['models_tested']}\n")
-    report.append(f"- Total Test Results: {stats['total_test_results']}\n")
-    report.append(f"- Successful Tests: {stats['successful_tests']}\n")
-    report.append(f"- Failed Tests: {stats['failed_tests']}\n\n")
-    
-    # Model success rates
-    if models:
-        report.append("## Model Performance Summary\n")
-        report.append("| Model | Providers | Attempts | Success Rate |\n")
-        report.append("| --- | --- | --- | --- |\n")
-        
-        for model in models:
-            # Get summaries for each model
-            summaries = client.generate_provider_summary(model)
+        for result in results:
+            total_tests += 1
+            provider = result.provider
             
-            if summaries:
-                total_attempts = sum(s.total_attempts for s in summaries)
-                total_success = sum(s.successful_attempts for s in summaries)
-                success_rate = (total_success / total_attempts * 100) if total_attempts > 0 else 0
+            # Initialize provider stats if needed
+            if provider not in provider_stats:
+                provider_stats[provider] = {
+                    "total": 0,
+                    "success": 0,
+                    "perfect_success": 0,
+                    "validation_errors": 0
+                }
+            
+            provider_stats[provider]["total"] += 1
+            
+            if result.success:
+                provider_stats[provider]["success"] += 1
+            
+            # Check for perfect_success
+            perfect_success = getattr(result, "perfect_success", result.success)
+            if perfect_success:
+                provider_stats[provider]["perfect_success"] += 1
+                model_perfect += 1
+                perfect_success_tests += 1
+            
+            # Track validation errors
+            validation_error_count = getattr(result, "validation_error_count", 0)
+            if validation_error_count > 0:
+                provider_stats[provider]["validation_errors"] += validation_error_count
+                model_errors += validation_error_count
+                total_validation_errors += validation_error_count
+                tests_with_validation_errors += 1
                 
-                report.append(f"| {model} | {len(summaries)} | {total_attempts} | {success_rate:.2f}% |\n")
+                # Analyze error patterns
+                validation_errors = getattr(result, "validation_errors", [])
+                for error in validation_errors:
+                    error_msg = error.get("message", "").lower()
+                    
+                    # Extract error type
+                    error_type = "other_validation_error"
+                    
+                    if "type=model_type" in error_msg:
+                        error_type = "model_type_error"
+                    elif "type=type_error" in error_msg:
+                        error_type = "type_error"
+                    elif "type=value_error" in error_msg:
+                        error_type = "value_error"
+                    elif "type=missing" in error_msg or "field required" in error_msg:
+                        error_type = "missing_field_error"
+                    elif "url" in error_msg or "uri" in error_msg:
+                        error_type = "url_format_error"
+                    elif "json" in error_msg:
+                        error_type = "json_format_error"
+                    
+                    error_patterns[error_type] = error_patterns.get(error_type, 0) + 1
+        
+        # Store model validation stats
+        model_validation_stats[model] = {
+            "total_tests": model_tests,
+            "validation_errors": model_errors,
+            "perfect_success": model_perfect,
+            "provider_stats": provider_stats
+        }
     
-    return "".join(report)
+    # Overall statistics
+    if total_tests > 0:
+        error_rate = (tests_with_validation_errors / total_tests) * 100
+        perfect_rate = (perfect_success_tests / total_tests) * 100
+        avg_errors = total_validation_errors / total_tests
+        
+        report.append("## Overall Statistics\n")
+        report.append(f"- **Total Tests**: {total_tests}\n")
+        report.append(f"- **Tests with Validation Errors**: {tests_with_validation_errors} ({error_rate:.2f}%)\n")
+        report.append(f"- **Perfect Success Rate**: {perfect_rate:.2f}%\n")
+        report.append(f"- **Total Validation Errors**: {total_validation_errors}\n")
+        report.append(f"- **Average Validation Errors per Test**: {avg_errors:.2f}\n\n")
+        
+        # Error pattern summary
+        report.append("## Validation Error Patterns\n")
+        report.append("| Error Type | Count | Percentage |\n")
+        report.append("| ---------- | ----- | ---------- |\n")
+        
+        for error_type, count in sorted(error_patterns.items(), key=lambda x: x[1], reverse=True):
+            percentage = (count / total_validation_errors) * 100 if total_validation_errors > 0 else 0
+            report.append(f"| {error_type} | {count} | {percentage:.2f}% |\n")
+        
+        report.append("\n")
+        
+        # Per-model statistics
+        report.append("## Validation Errors by Model\n")
+        report.append("| Model | Total Tests | Success Rate | Perfect Success Rate | Validation Errors | Avg Errors/Test |\n")
+        report.append("| ----- | ----------- | ----------- | -------------------- | ----------------- | --------------- |\n")
+        
+        for model, stats in model_validation_stats.items():
+            total = stats["total_tests"]
+            if total == 0:
+                continue
+                
+            perfect_rate = (stats["perfect_success"] / total) * 100
+            error_count = stats["validation_errors"]
+            avg_errors = error_count / total
+            
+            report.append(f"| {model} | {total} | {perfect_rate:.2f}% | {error_count} | {avg_errors:.2f} |\n")
+        
+        report.append("\n")
+        
+        # Per-provider statistics
+        for model, stats in model_validation_stats.items():
+            report.append(f"### Model: {model}\n\n")
+            report.append("| Provider | Tests | Success Rate | Perfect Success Rate | Validation Errors | Avg Errors/Test |\n")
+            report.append("| -------- | ----- | ----------- | -------------------- | ----------------- | --------------- |\n")
+            
+            for provider, provider_stats in stats["provider_stats"].items():
+                total = provider_stats["total"]
+                if total == 0:
+                    continue
+                    
+                success_rate = (provider_stats["success"] / total) * 100
+                perfect_rate = (provider_stats["perfect_success"] / total) * 100
+                error_count = provider_stats["validation_errors"]
+                avg_errors = error_count / total
+                
+                report.append(f"| {provider} | {total} | {success_rate:.2f}% | {perfect_rate:.2f}% | {error_count} | {avg_errors:.2f} |\n")
+            
+            report.append("\n")
+    
+    # Save report
+    report_content = "".join(report)
+    client.save_report(f"validation_errors_{batch_timestamp}", report_content)
+    
+    return report_content
 
-def generate_error_pattern_report() -> str:
-    """Generate a report focused on error patterns across all tests.
-    
-    Returns:
-        Markdown formatted report content
-    """
-    # Get all results
-    all_results = client.load_test_results()
-    failed_results = [r for r in all_results if not r.success]
-    
-    if not failed_results:
-        return "# Error Pattern Analysis\n\nNo failed tests found to analyze.\n"
-    
-    # Categorize errors
-    error_categories = {}
-    for result in failed_results:
-        category = result.error_category or "unknown"
-        if category not in error_categories:
-            error_categories[category] = []
-        error_categories[category].append(result)
-    
-    # Build the report
-    report = []
-    report.append(f"# Error Pattern Analysis\n")
-    report.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-    report.append(f"Total Failed Tests: {len(failed_results)}\n\n")
-    
-    # Error distribution section
-    report.append("## Error Distribution\n")
-    report.append("| Category | Count | Percentage |\n")
-    report.append("| --- | --- | --- |\n")
-    
-    for category, errors in sorted(error_categories.items(), key=lambda x: len(x[1]), reverse=True):
-        percentage = (len(errors) / len(failed_results) * 100)
-        report.append(f"| {category} | {len(errors)} | {percentage:.2f}% |\n")
-    
-    # Detailed analysis of each category
-    report.append("\n## Detailed Error Analysis\n")
-    
-    for category, errors in sorted(error_categories.items(), key=lambda x: len(x[1]), reverse=True):
-        report.append(f"### {category} Errors\n")
-        
-        # Provider distribution
-        provider_counts = {}
-        for error in errors:
-            provider_counts[error.provider] = provider_counts.get(error.provider, 0) + 1
-        
-        report.append("#### Provider Distribution\n")
-        for provider, count in sorted(provider_counts.items(), key=lambda x: x[1], reverse=True):
-            report.append(f"- {provider}: {count} errors ({count / len(errors) * 100:.2f}%)\n")
-        
-        # Sample errors
-        report.append("\n#### Sample Error Messages\n")
-        samples = errors[:3]  # Take up to 3 samples
-        for sample in samples:
-            report.append(f"- **Provider**: {sample.provider}\n")
-            report.append(f"  **Model**: {sample.model}\n")
-            report.append(f"  **Prompt ID**: {sample.prompt_id}\n")
-            report.append(f"  **Error**: {sample.error_message}\n\n")
-    
-    return "".join(report)
 
-def save_report(report_name: str, content: str) -> bool:
-    """Save a report to files.
-    
-    Args:
-        report_name: Name of the report file
-        content: Report content
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        client.save_report(report_name, content)
-        return True
-    except Exception:
-        return False
+def main():
+    client = FileSystemClient()
+    generate_validation_error_report(client)
 
-def generate_and_save_all_reports() -> Dict[str, bool]:
-    """Generate and save all standard reports.
-    
-    Returns:
-        Dictionary mapping report names to success status
-    """
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results = {}
-    
-    # Summary report
-    summary_report = generate_summary_report()
-    results["summary"] = save_report(f"summary_{timestamp}", summary_report)
-    
-    # Error analysis report
-    error_report = generate_error_pattern_report()
-    results["error_analysis"] = save_report(f"error_analysis_{timestamp}", error_report)
-    
-    # Model comparison reports
-    for model in client.list_models():
-        model_name = model.replace("/", "_")
-        comparison_report = generate_model_comparison_report(model)
-        results[f"model_{model_name}"] = save_report(f"model_comparison_{model_name}_{timestamp}", comparison_report)
-    
-    return results
+
+if __name__ == "__main__":
+    main()
