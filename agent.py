@@ -230,22 +230,47 @@ class ProviderTester:
             validation_errors = []
             for msg in all_messages:
                 for part in msg.parts:
-                    if isinstance(part, ToolReturnPart) and "Error executing tool" in part.content:
+                    # Check for validation errors in any part that contains error messages
+                    # regardless of the specific part type
+                    has_error = False
+                    error_content = ""
+                    
+                    # Check if it's a ToolReturnPart with error content
+                    if isinstance(part, ToolReturnPart) and hasattr(part, 'content') and "Error executing tool" in str(part.content):
+                        has_error = True
                         error_content = str(part.content).lower()
-                        if any(pattern in error_content for pattern in [
+                    
+                    # Check if it's a retry-prompt part with error content 
+                    elif (hasattr(part, 'part_kind') and part.part_kind == "retry-prompt" and 
+                          hasattr(part, 'content') and "Error executing tool" in str(part.content)):
+                        has_error = True
+                        error_content = str(part.content).lower()
+                    
+                    # Process the error if we found one
+                    if has_error and error_content and any(pattern in error_content for pattern in [
                             "validation error", 
                             "errors.pydantic.dev", 
                             "type=model_type", 
                             "type=value_error", 
                             "type=type_error", 
+                            "type=missing",
                             "field required", 
-                            "input should be"
+                            "input should be",
+                            "not valid"
                         ]):
-                            validation_errors.append({
-                                "message": part.content,
-                                "tool": part.tool_name if hasattr(part, 'tool_name') else "unknown",
-                                "timestamp": datetime.now().isoformat()
-                            })
+                        # Extract the tool name from either attribute or JSON content
+                        tool_name = "unknown"
+                        if hasattr(part, 'tool_name'):
+                            tool_name = part.tool_name
+                        elif hasattr(part, 'content') and isinstance(part.content, dict) and 'tool_name' in part.content:
+                            tool_name = part.content['tool_name']
+                        
+                        validation_errors.append({
+                            "message": part.content if hasattr(part, 'content') else str(part),
+                            "tool": tool_name,
+                            "timestamp": datetime.now().isoformat()
+                        })
+                        logger.info(f"Detected validation error in tool: {tool_name}")
             
             # Count tool calls
             for msg in all_messages:
@@ -449,6 +474,9 @@ class ProviderTester:
             # Log validation error info if present
             if all_validation_errors:
                 logger.warning(f"Test completed with {len(all_validation_errors)} validation errors")
+                for i, err in enumerate(all_validation_errors[:5]):  # Log first 5 errors
+                    if isinstance(err, dict) and "message" in err:
+                        logger.warning(f"Validation error {i+1}: {str(err['message'])[:100]}...")
             
         except Exception as e:
             logger.error(f"Failed to save results file: {e}")

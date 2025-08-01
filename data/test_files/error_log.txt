@@ -1,1 +1,0 @@
-When a file is not found during a read operation, I will inform the user that the file does not exist and offer options like creating the file or attempting to read a different file.

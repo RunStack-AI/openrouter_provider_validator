@@ -1,1 +1,0 @@
-This is a summary of sample1.txt. The file contains three lines of text, describing itself as a sample file with multiple lines, used for testing file reading operations.
