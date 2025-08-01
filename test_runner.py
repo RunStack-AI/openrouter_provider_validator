@@ -17,6 +17,7 @@ from agent import ProviderTester
 from filesystem_test_helper import FileSystemTestHelper
 from provider_config import ProviderConfig
 from client import TestResult
+from error_classifier import get_error_description
 
 # Configure logging
 logging_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -33,35 +34,36 @@ logging.basicConfig(
 
 logger = logging.getLogger("test_runner")
 
-async def load_prompts(prompts_dir="prompts", prompt_ids=None):
+async def load_prompts(prompts_path="data/prompts.json", prompt_ids=None):
     """
-    Load all prompts from the prompts directory.
+    Load all prompts from the prompts JSON file.
     
     Args:
-        prompts_dir: Directory containing prompt files
+        prompts_path: Path to prompts JSON file
         prompt_ids: Optional list of specific prompt IDs to load
     
     Returns:
         List of prompt configurations
     """
-    prompts_path = Path(prompts_dir)
     prompts = []
     
-    if not prompts_path.exists() or not prompts_path.is_dir():
-        logger.error(f"Prompts directory not found: {prompts_path}")
-        return []
-    
-    # Load all JSON files in the prompts directory
-    for prompt_file in prompts_path.glob("*.json"):
-        try:
-            with open(prompt_file, "r") as f:
-                prompt = json.load(f)
-                prompt["id"] = prompt_file.stem
+    try:
+        prompts_file = Path(prompts_path)
+        if not prompts_file.exists() or not prompts_file.is_file():
+            logger.error(f"Prompts file not found: {prompts_file}")
+            return []
+        
+        # Load all prompts from the JSON file
+        with open(prompts_file, "r") as f:
+            all_prompts = json.load(f)
+            
+        # Filter by prompt_ids if provided
+        for prompt in all_prompts:
+            if prompt_ids is None or prompt["id"] in prompt_ids:
+                prompts.append(prompt)
                 
-                if prompt_ids is None or prompt["id"] in prompt_ids:
-                    prompts.append(prompt)
-        except Exception as e:
-            logger.error(f"Error loading prompt file {prompt_file}: {e}")
+    except Exception as e:
+        logger.error(f"Error loading prompts file {prompts_path}: {e}")
     
     return prompts
 
@@ -96,6 +98,23 @@ async def get_provider_display_name(provider_id, results=None):
         pass
         
     return provider_id or "Default Routing"
+
+
+def aggregate_errors(results):
+    """
+    Aggregate error categories from test results.
+    
+    Args:
+        results: List of test results
+        
+    Returns:
+        Dictionary of error categories and their counts
+    """
+    error_counts = {}
+    for result in results:
+        if not result.success and result.error_category:
+            error_counts[result.error_category] = error_counts.get(result.error_category, 0) + 1
+    return error_counts
 
 
 async def run_provider_tests(model: str, provider_config: Dict, all_prompts: List[Dict], output_dir: str, batch_timestamp: str):
@@ -185,7 +204,121 @@ async def run_provider_tests(model: str, provider_config: Dict, all_prompts: Lis
     if provider_id is not None and provider_id != "":
         result_key = provider_id
     
-    return result_key, provider_results
+    # Add error summary to results
+    return result_key, {
+        "results": provider_results,
+        "error_summary": aggregate_errors(provider_results)
+    }
+
+
+async def generate_markdown_report(all_results, output_dir, batch_timestamp):
+    """
+    Generate a markdown summary report with error statistics.
+    
+    Args:
+        all_results: Test results organized by model and provider
+        output_dir: Directory to save the report
+        batch_timestamp: Timestamp for this report
+    """
+    report_path = Path(output_dir) / f"summary_report_{batch_timestamp}.md"
+    
+    with open(report_path, "w") as f:
+        # Write report header
+        f.write(f"# OpenRouter Provider Validator Test Report\n\n")
+        f.write(f"## Summary - {batch_timestamp}\n\n")
+        
+        # Write overall statistics
+        total_tests = 0
+        total_success = 0
+        total_failure = 0
+        model_stats = {}
+        
+        for model, model_results in all_results.items():
+            model_total = 0
+            model_success = 0
+            model_failure = 0
+            
+            for provider_key, provider_data in model_results.items():
+                if provider_key == "_aggregate":
+                    continue
+                    
+                for result in provider_data["results"]:
+                    model_total += 1
+                    if result.success:
+                        model_success += 1
+                    else:
+                        model_failure += 1
+            
+            total_tests += model_total
+            total_success += model_success
+            total_failure += model_failure
+            
+            model_stats[model] = {
+                "total": model_total,
+                "success": model_success,
+                "failure": model_failure,
+                "success_rate": f"{model_success / model_total * 100:.1f}%" if model_total > 0 else "N/A"
+            }
+        
+        # Write overall statistics
+        f.write(f"**Total Tests**: {total_tests}\n\n")
+        f.write(f"**Success Rate**: {total_success / total_tests * 100:.1f}% ({total_success}/{total_tests})\n\n")
+        
+        # Write per-model statistics
+        f.write("### Model Success Rates\n\n")
+        f.write("| Model | Success | Failure | Success Rate |\n")
+        f.write("| ----- | ------- | ------- | ------------ |\n")
+        
+        for model, stats in model_stats.items():
+            f.write(f"| {model} | {stats['success']} | {stats['failure']} | {stats['success_rate']} |\n")
+        
+        f.write("\n")
+        
+        # Add error statistics section
+        f.write("## Error Statistics\n\n")
+        
+        # Write per-model error statistics
+        for model, model_results in all_results.items():
+            f.write(f"### Model: {model}\n\n")
+            
+            # Aggregate error statistics across all providers for this model
+            if "_aggregate" in model_results:
+                f.write("#### Overall Error Distribution\n\n")
+                f.write("| Error Category | Count | Description |\n")
+                f.write("| -------------- | ----- | ----------- |\n")
+                
+                for category, count in sorted(
+                    model_results["_aggregate"]["error_summary"].items(),
+                    key=lambda x: x[1],  # Sort by count
+                    reverse=True  # Highest count first
+                ):
+                    description = get_error_description(category)
+                    f.write(f"| {category} | {count} | {description} |\n")
+                
+                f.write("\n")
+            
+            # Per-provider error statistics
+            for provider_key, provider_data in model_results.items():
+                if provider_key == "_aggregate":
+                    continue
+                    
+                provider_display = await get_provider_display_name(provider_key)
+                if "error_summary" in provider_data and provider_data["error_summary"]:
+                    f.write(f"#### Provider: {provider_display}\n\n")
+                    f.write("| Error Category | Count | Description |\n")
+                    f.write("| -------------- | ----- | ----------- |\n")
+                    
+                    for category, count in sorted(
+                        provider_data["error_summary"].items(),
+                        key=lambda x: x[1],  # Sort by count
+                        reverse=True  # Highest count first
+                    ):
+                        description = get_error_description(category)
+                        f.write(f"| {category} | {count} | {description} |\n")
+                    
+                    f.write("\n")
+    
+    logger.info(f"Markdown summary report saved to {report_path}")
 
 
 async def run_tests(
@@ -276,36 +409,59 @@ async def run_tests(
                 if isinstance(result, Exception):
                     logger.error(f"Error running provider tests: {result}")
                 else:
-                    provider_key, provider_results = result
-                    model_results[provider_key] = provider_results
+                    provider_key, provider_data = result
+                    model_results[provider_key] = provider_data
         else:
             # Run provider tests sequentially
             for provider_config in model_providers:
-                provider_key, provider_results = await run_provider_tests(
+                provider_key, provider_data = await run_provider_tests(
                     model, provider_config, all_prompts, output_dir, batch_timestamp
                 )
-                model_results[provider_key] = provider_results
+                model_results[provider_key] = provider_data
         
+        # Add aggregate error statistics across all providers for this model
+        all_provider_errors = {}
+        for provider_key, provider_data in model_results.items():
+            for error_cat, count in provider_data["error_summary"].items():
+                all_provider_errors[error_cat] = all_provider_errors.get(error_cat, 0) + count
+        
+        model_results["_aggregate"] = {"error_summary": all_provider_errors}
         all_results[model] = model_results
     
-    # Save summary report
+    # Save JSON summary report
     try:
-        report_path = Path(output_dir) / f"summary_report_{batch_timestamp}.json"
-        with open(report_path, "w") as f:
-            # Convert TestResult objects to dicts for JSON serialization
+        json_report_path = Path(output_dir) / f"summary_report_{batch_timestamp}.json"
+        with open(json_report_path, "w") as f:
+            # Convert test results to dicts for JSON serialization
             json_results = {}
             for model, model_results in all_results.items():
                 json_results[model] = {}
-                for provider_key, provider_results in model_results.items():
-                    json_results[model][provider_key] = [
-                        json.loads(res.json()) if hasattr(res, 'json') else res 
-                        for res in provider_results
-                    ]
-                    
+                for provider_key, provider_data in model_results.items():
+                    if provider_key == "_aggregate":
+                        # Just include the error summary for aggregate data
+                        json_results[model][provider_key] = {
+                            "error_summary": provider_data["error_summary"]
+                        }
+                    else:
+                        # Include both results and error summary for providers
+                        json_results[model][provider_key] = {
+                            "results": [
+                                json.loads(res.model_dump_json()) if hasattr(res, 'model_dump_json') else res 
+                                for res in provider_data["results"]
+                            ],
+                            "error_summary": provider_data["error_summary"]
+                        }
+            
             json.dump(json_results, f, indent=2, default=str)
-        logger.info(f"Summary report saved to {report_path}")
+        logger.info(f"JSON summary report saved to {json_report_path}")
     except Exception as e:
-        logger.error(f"Error saving summary report: {e}")
+        logger.error(f"Error saving JSON summary report: {e}")
+    
+    # Generate markdown summary report
+    try:
+        await generate_markdown_report(all_results, output_dir, batch_timestamp)
+    except Exception as e:
+        logger.error(f"Error generating markdown summary report: {e}")
     
     # Return the overall results
     return all_results

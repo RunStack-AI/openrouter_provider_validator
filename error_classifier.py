@@ -67,12 +67,19 @@ def classify_error(status_code: Optional[int], error_message: str) -> str:
     ]):
         return "content_filter_error"
     
-    # Check for input validation errors
+    # Check for input validation errors (enhanced to catch Pydantic validation errors)
     if status_code == 400 or any(pattern in error_message for pattern in [
         "invalid request", 
         "validation error", 
         "invalid parameter", 
-        "bad request"
+        "bad request",
+        "pydantic",  # Added pattern for Pydantic errors
+        "errors.pydantic.dev",  # Added pattern for Pydantic error URLs
+        "validation errors",  # Added pattern for multiple validation errors
+        "not valid",  # Added common validation phrase
+        "field required",  # Added common validation phrase
+        "type error",  # Added common validation error message
+        "input should be"  # Added common validation error message
     ]):
         return "input_validation_error"
     
@@ -133,14 +140,15 @@ def get_error_description(category: str) -> str:
         "server_error": "Server-side errors or service unavailability",
         "timeout_error": "Request timed out or took too long to complete",
         "content_filter_error": "Content was flagged or filtered by safety measures",
-        "input_validation_error": "Invalid input parameters or validation failures",
+        "input_validation_error": "Invalid input parameters, validation failures or schema mismatch",
         "tool_usage_error": "Issues with function or tool usage/format",
         "token_limit_error": "Exceeded token or context length limits",
         "request_format_error": "Malformed request or formatting problems",
         "provider_error": "Provider-specific errors or routing issues",
         "unknown_error": "Unclassified or unknown error type",
         "configuration_error": "Local configuration issues or missing settings",
-        "max_retries_exceeded": "Maximum retry attempts reached without success"
+        "max_retries_exceeded": "Maximum retry attempts reached without success",
+        "execution_error": "General error during test execution"
     }
     
     return descriptions.get(category, "No description available")
