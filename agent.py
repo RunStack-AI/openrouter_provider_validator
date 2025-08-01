@@ -28,7 +28,7 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.agent import AgentRunResult
 from pydantic_ai.messages import ModelResponsePart
 
-from client import FileSystemClient
+from client import FileSystemClient, TestResult
 from filesystem_test_helper import FileSystemTestHelper
 from provider_config import ProviderConfig
 from serialization_helper import json_serializable
@@ -260,14 +260,14 @@ class ProviderTester:
                 "latency_ms": 0
             }
     
-    async def run_test(self, prompt_id: str = "file_operations_sequence") -> TestResults:
+    async def run_test(self, prompt_id: str = "file_operations_sequence") -> TestResult:
         """Run a specific test sequence.
         
         Args:
             prompt_id: ID of the prompt sequence to run
             
         Returns:
-            TestResults dictionary
+            TestResult object
         """
         # Reset conversation for this test
         self.conversation = []
@@ -288,20 +288,21 @@ class ProviderTester:
         # Load the prompt sequence
         prompt_sequence = self.test_helper.load_prompt_sequence(prompt_id)
         if not prompt_sequence:
-            return {
-                "model": self.model,
-                "provider": self.provider or "unknown",
-                "prompt_id": prompt_id,
-                "success": False,
-                "total_steps": 0,
-                "successful_steps": 0,
-                "messages": [],
-                "metrics": {
+            # Return a TestResult object even for failure
+            return TestResult(
+                model=self.model,
+                provider=self.provider or "unknown",
+                prompt_id=prompt_id,
+                success=False,
+                timestamp=datetime.now().isoformat(),
+                metrics={
                     "total_tool_calls": 0,
                     "total_send_count": 0,
-                    "latency_ms": 0
+                    "latency_ms": 0,
+                    "total_steps": 0,
+                    "successful_steps": 0,
                 }
-            }
+            )
         
         logger.info(f"Running test {prompt_id} with {len(prompt_sequence['sequence'])} steps")
         
@@ -353,21 +354,25 @@ class ProviderTester:
                 logger.warning(f"Error serializing message: {e}")
                 serialized_messages.append({"error": f"Failed to serialize message: {str(e)}"})
         
-        # Save test results
-        result = {
-            "model": self.model,
-            "provider": self.provider or "unknown",
-            "prompt_id": prompt_id,
-            "success": successful_steps == len(prompt_sequence["sequence"]),
+        # Create metrics dictionary including extra fields that don't fit in TestResult
+        metrics = {
+            "total_tool_calls": self.tool_calls_count,
+            "total_send_count": self.send_count,
+            "latency_ms": avg_latency,
             "total_steps": len(prompt_sequence["sequence"]),
             "successful_steps": successful_steps,
-            "messages": serialized_messages,
-            "metrics": {
-                "total_tool_calls": self.tool_calls_count,
-                "total_send_count": self.send_count,
-                "latency_ms": avg_latency
-            }
+            "messages": serialized_messages
         }
+        
+        # Create TestResult object
+        result = TestResult(
+            model=self.model,
+            provider=self.provider or "unknown",
+            prompt_id=prompt_id,
+            success=successful_steps == len(prompt_sequence["sequence"]),
+            metrics=metrics,
+            timestamp=datetime.now().isoformat()
+        )
         
         # Save result to file with proper directory structure
         # Format: results/model/prompt_id/provider_variant/timestamp.json
@@ -399,7 +404,9 @@ class ProviderTester:
         
         try:
             with open(result_file, "w") as f:
-                json.dump(result, f, indent=2, default=str)
+                # Convert result to dict for saving with proper serialization
+                result_dict = json.loads(result.json())
+                json.dump(result_dict, f, indent=2, default=str)
             logger.info(f"Test results saved to {result_file}")
             
             # Also save a copy to the client's format for reporting
