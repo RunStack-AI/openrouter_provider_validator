@@ -1,17 +1,19 @@
 # Changelog
 
-## 2025-07-31
+## 2025-08-01
 
 ### Added
-- Parallel provider testing capability
-- Provider-specific test directories for isolated testing
-- Command-line option `--sequential` to disable parallel testing
-- Custom test directory support via environment variables
-- Template-based test file initialization
-- Documentation for parallel testing features
-- Improved path resolution in FileSystemTestHelper
+- Enhanced validation error tracking to detect errors in successful tests
+- New TestResult model fields for validation_errors, validation_error_count, and perfect_success
+- Specialized validation error reporting to distinguish between perfect and partial success
+- Detailed validation error patterns analysis in reports
+
+### Changed
+- Modified agent.py to detect and track validation errors in tool responses
+- Updated test_runner.py to process validation errors in both successful and failed tests
+- Enhanced report generation to include validation error statistics
+- Improved JSON report to include perfect_success metrics
 
 ### Fixed
-- Report file creation issues with multiple providers
-- File conflicts during concurrent testing
-- Path resolution issues when using relative paths
+- Fixed issue where validation errors during successful tests were not being tracked
+- Fixed misleading 100% success rates for models that had validation errors but completed steps
