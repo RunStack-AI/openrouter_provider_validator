@@ -17,7 +17,7 @@ from agent import ProviderTester
 from filesystem_test_helper import FileSystemTestHelper
 from provider_config import ProviderConfig
 from client import TestResult
-from error_classifier import get_error_description
+from error_classifier import classify_error, get_error_description
 
 # Configure logging
 logging_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -117,6 +117,45 @@ def aggregate_errors(results):
     return error_counts
 
 
+def extract_validation_errors(results):
+    """
+    Extract pydantic validation error details from test results.
+    
+    Args:
+        results: List of test results
+    
+    Returns:
+        Dictionary with validation error patterns and counts
+    """
+    validation_errors = {}
+    
+    for result in results:
+        if (not result.success and 
+            result.error_message and 
+            result.error_category == "input_validation_error"):
+            
+            # Try to extract the validation error type from pydantic error message
+            error_type = "generic_validation_error"
+            error_msg = result.error_message.lower()
+            
+            if "type=model_type" in error_msg:
+                error_type = "model_type_error"
+            elif "type=type_error" in error_msg:
+                error_type = "type_error"
+            elif "type=value_error" in error_msg:
+                error_type = "value_error"
+            elif "type=missing" in error_msg or "field required" in error_msg:
+                error_type = "missing_field_error"
+            elif "url" in error_msg or "uri" in error_msg:
+                error_type = "url_format_error"
+            elif "json" in error_msg:
+                error_type = "json_format_error"
+            
+            validation_errors[error_type] = validation_errors.get(error_type, 0) + 1
+    
+    return validation_errors
+
+
 async def run_provider_tests(model: str, provider_config: Dict, all_prompts: List[Dict], output_dir: str, batch_timestamp: str):
     """
     Run tests for a specific provider and model.
@@ -174,11 +213,36 @@ async def run_provider_tests(model: str, provider_config: Dict, all_prompts: Lis
         test_files_dir=provider_test_dir
     )
     
+    # Save detailed results for each prompt
+    os.makedirs(Path(output_dir) / model_safe / provider_safe, exist_ok=True)
+    
     for prompt in all_prompts:
         logger.info(f"Running test: {prompt['id']} with provider {provider_name}")
         try:
             result = await tester.run_test(prompt["id"])
+            
+            # Process validation errors
+            if not result.success and result.error_message:
+                # Ensure error is classified
+                if not result.error_category:
+                    # Try to extract status code from error message
+                    status_code = None
+                    if result.response_data and 'status_code' in result.response_data:
+                        status_code = result.response_data['status_code']
+                    
+                    result.error_category = classify_error(status_code, result.error_message)
+            
             provider_results.append(result)
+            
+            # Save detailed result for this prompt
+            try:
+                prompt_result_path = Path(output_dir) / model_safe / prompt["id"] / provider_safe
+                prompt_result_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(prompt_result_path / f"{batch_timestamp}.json", "w") as f:
+                    json.dump(json.loads(result.model_dump_json()), f, indent=2)
+            except Exception as e:
+                logger.error(f"Error saving detailed result: {e}")
+                
         except Exception as e:
             logger.error(f"Error running test {prompt['id']} with provider {provider_name}: {e}")
             # Create a failed result record as a TestResult object
@@ -207,13 +271,60 @@ async def run_provider_tests(model: str, provider_config: Dict, all_prompts: Lis
     # Add error summary to results
     return result_key, {
         "results": provider_results,
-        "error_summary": aggregate_errors(provider_results)
+        "error_summary": aggregate_errors(provider_results),
+        "validation_errors": extract_validation_errors(provider_results),
+        "provider_name": provider_name
+    }
+
+
+async def calculate_provider_metrics(provider_results):
+    """
+    Calculate summary metrics for a provider's test results.
+    
+    Args:
+        provider_results: List of test results for a provider
+    
+    Returns:
+        Dictionary of metrics
+    """
+    total_tests = len(provider_results)
+    success_count = sum(1 for r in provider_results if r.success)
+    
+    # Calculate average latency and tool calls only for successful tests
+    successful_tests = [r for r in provider_results if r.success and r.metrics]
+    
+    avg_latency = 0
+    avg_tool_calls = 0
+    avg_steps = 0
+    
+    if successful_tests:
+        avg_latency = sum(r.metrics.get("latency_ms", 0) for r in successful_tests) / len(successful_tests)
+        avg_tool_calls = sum(r.metrics.get("total_tool_calls", 0) for r in successful_tests) / len(successful_tests)
+        
+        # Calculate average successful steps percentage
+        step_percentages = []
+        for r in successful_tests:
+            total_steps = r.metrics.get("total_steps", 0)
+            successful_steps = r.metrics.get("successful_steps", 0)
+            if total_steps > 0:
+                step_percentages.append(successful_steps / total_steps * 100)
+        
+        if step_percentages:
+            avg_steps = sum(step_percentages) / len(step_percentages)
+    
+    return {
+        "total_tests": total_tests,
+        "success_count": success_count,
+        "success_rate": success_count / total_tests * 100 if total_tests > 0 else 0,
+        "avg_latency_ms": avg_latency,
+        "avg_tool_calls": avg_tool_calls,
+        "avg_step_success": avg_steps
     }
 
 
 async def generate_markdown_report(all_results, output_dir, batch_timestamp):
     """
-    Generate a markdown summary report with error statistics.
+    Generate a markdown summary report with detailed statistics.
     
     Args:
         all_results: Test results organized by model and provider
@@ -274,12 +385,67 @@ async def generate_markdown_report(all_results, output_dir, batch_timestamp):
         
         f.write("\n")
         
+        # Results by Model and Provider section
+        f.write("## Results by Model and Provider\n\n")
+        
+        for model, model_results in all_results.items():
+            f.write(f"### Model: {model}\n\n")
+            
+            # Create provider summary table
+            f.write("| Provider | Tests | Success Rate | Avg Tool Calls | Avg Steps | Avg Latency |\n")
+            f.write("| -------- | ----- | ----------- | -------------- | --------- | ----------- |\n")
+            
+            for provider_key, provider_data in model_results.items():
+                if provider_key == "_aggregate":
+                    continue
+                    
+                # Calculate provider metrics
+                metrics = await calculate_provider_metrics(provider_data["results"])
+                provider_name = provider_data.get("provider_name", await get_provider_display_name(provider_key))
+                
+                f.write(f"| {provider_name} | {metrics['total_tests']} | ")
+                f.write(f"{metrics['success_rate']:.1f}% | ")
+                f.write(f"{metrics['avg_tool_calls']:.1f} | ")
+                f.write(f"{metrics['avg_step_success']:.1f}% | ")
+                f.write(f"{metrics['avg_latency_ms']:.0f}ms |\n")
+            
+            f.write("\n")
+            
+            # Write per-provider details
+            for provider_key, provider_data in model_results.items():
+                if provider_key == "_aggregate":
+                    continue
+                    
+                provider_name = provider_data.get("provider_name", await get_provider_display_name(provider_key))
+                f.write(f"#### Provider: {provider_name}\n\n")
+                
+                # Create per-prompt results table
+                f.write("| Prompt | Success | Steps | Tool Calls | Latency |\n")
+                f.write("| ------ | ------- | ----- | ---------- | ------- |\n")
+                
+                for result in provider_data["results"]:
+                    success_marker = "✓" if result.success else "✗"
+                    
+                    # Extract metrics
+                    metrics = result.metrics or {}
+                    total_steps = metrics.get("total_steps", 0)
+                    successful_steps = metrics.get("successful_steps", 0)
+                    steps_display = f"{successful_steps}/{total_steps}" if total_steps > 0 else "N/A"
+                    
+                    tool_calls = metrics.get("total_tool_calls", 0)
+                    latency = metrics.get("latency_ms", 0)
+                    
+                    f.write(f"| {result.prompt_id} | {success_marker} | {steps_display} | ")
+                    f.write(f"{tool_calls} | {latency:.2f}ms |\n")
+                
+                f.write("\n")
+        
         # Add error statistics section
         f.write("## Error Statistics\n\n")
         
         # Write per-model error statistics
         for model, model_results in all_results.items():
-            f.write(f"### Model: {model}\n\n")
+            f.write(f"### Error Analysis for Model: {model}\n\n")
             
             # Aggregate error statistics across all providers for this model
             if "_aggregate" in model_results:
@@ -296,15 +462,42 @@ async def generate_markdown_report(all_results, output_dir, batch_timestamp):
                     f.write(f"| {category} | {count} | {description} |\n")
                 
                 f.write("\n")
+                
+                # Add validation error details if present
+                if "validation_errors" in model_results["_aggregate"] and model_results["_aggregate"]["validation_errors"]:
+                    f.write("##### Validation Error Details\n\n")
+                    f.write("| Error Type | Count | Description |\n")
+                    f.write("| ---------- | ----- | ----------- |\n")
+                    
+                    validation_descriptions = {
+                        "model_type_error": "Incorrect model type or format (expected a dict, received a string)",
+                        "type_error": "Incorrect data type (e.g., int vs. string)",
+                        "value_error": "Value is not valid despite having the correct type",
+                        "missing_field_error": "Required field is missing",
+                        "url_format_error": "URL format is invalid",
+                        "json_format_error": "JSON format is invalid",
+                        "generic_validation_error": "Other validation errors"
+                    }
+                    
+                    for error_type, count in sorted(
+                        model_results["_aggregate"]["validation_errors"].items(),
+                        key=lambda x: x[1],
+                        reverse=True
+                    ):
+                        description = validation_descriptions.get(error_type, "Unspecified validation error")
+                        f.write(f"| {error_type} | {count} | {description} |\n")
+                    
+                    f.write("\n")
             
             # Per-provider error statistics
             for provider_key, provider_data in model_results.items():
                 if provider_key == "_aggregate":
                     continue
                     
-                provider_display = await get_provider_display_name(provider_key)
+                provider_name = provider_data.get("provider_name", await get_provider_display_name(provider_key))
+                
                 if "error_summary" in provider_data and provider_data["error_summary"]:
-                    f.write(f"#### Provider: {provider_display}\n\n")
+                    f.write(f"#### Provider: {provider_name}\n\n")
                     f.write("| Error Category | Count | Description |\n")
                     f.write("| -------------- | ----- | ----------- |\n")
                     
@@ -317,6 +510,32 @@ async def generate_markdown_report(all_results, output_dir, batch_timestamp):
                         f.write(f"| {category} | {count} | {description} |\n")
                     
                     f.write("\n")
+                    
+                    # Add provider-specific validation errors if present
+                    if "validation_errors" in provider_data and provider_data["validation_errors"]:
+                        f.write("##### Validation Error Details\n\n")
+                        f.write("| Error Type | Count | Description |\n")
+                        f.write("| ---------- | ----- | ----------- |\n")
+                        
+                        validation_descriptions = {
+                            "model_type_error": "Incorrect model type or format (expected a dict, received a string)",
+                            "type_error": "Incorrect data type (e.g., int vs. string)",
+                            "value_error": "Value is not valid despite having the correct type",
+                            "missing_field_error": "Required field is missing",
+                            "url_format_error": "URL format is invalid",
+                            "json_format_error": "JSON format is invalid",
+                            "generic_validation_error": "Other validation errors"
+                        }
+                        
+                        for error_type, count in sorted(
+                            provider_data["validation_errors"].items(),
+                            key=lambda x: x[1],
+                            reverse=True
+                        ):
+                            description = validation_descriptions.get(error_type, "Unspecified validation error")
+                            f.write(f"| {error_type} | {count} | {description} |\n")
+                        
+                        f.write("\n")
     
     logger.info(f"Markdown summary report saved to {report_path}")
 
@@ -421,11 +640,23 @@ async def run_tests(
         
         # Add aggregate error statistics across all providers for this model
         all_provider_errors = {}
+        all_validation_errors = {}
+        
         for provider_key, provider_data in model_results.items():
+            # Aggregate error categories
             for error_cat, count in provider_data["error_summary"].items():
                 all_provider_errors[error_cat] = all_provider_errors.get(error_cat, 0) + count
+            
+            # Aggregate validation errors
+            if "validation_errors" in provider_data:
+                for error_type, count in provider_data["validation_errors"].items():
+                    all_validation_errors[error_type] = all_validation_errors.get(error_type, 0) + count
         
-        model_results["_aggregate"] = {"error_summary": all_provider_errors}
+        model_results["_aggregate"] = {
+            "error_summary": all_provider_errors,
+            "validation_errors": all_validation_errors
+        }
+        
         all_results[model] = model_results
     
     # Save JSON summary report
@@ -438,18 +669,21 @@ async def run_tests(
                 json_results[model] = {}
                 for provider_key, provider_data in model_results.items():
                     if provider_key == "_aggregate":
-                        # Just include the error summary for aggregate data
+                        # Include both error summary and validation errors for aggregate data
                         json_results[model][provider_key] = {
-                            "error_summary": provider_data["error_summary"]
+                            "error_summary": provider_data["error_summary"],
+                            "validation_errors": provider_data.get("validation_errors", {})
                         }
                     else:
-                        # Include both results and error summary for providers
+                        # Include results, error summary and provider name
                         json_results[model][provider_key] = {
+                            "provider_name": provider_data.get("provider_name", provider_key),
                             "results": [
                                 json.loads(res.model_dump_json()) if hasattr(res, 'model_dump_json') else res 
                                 for res in provider_data["results"]
                             ],
-                            "error_summary": provider_data["error_summary"]
+                            "error_summary": provider_data["error_summary"],
+                            "validation_errors": provider_data.get("validation_errors", {})
                         }
             
             json.dump(json_results, f, indent=2, default=str)
