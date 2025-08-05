@@ -289,8 +289,8 @@ def list_folder_contents(request: ListFolderRequest, ctx: Context) -> ListFolder
     try:
         # Use test_helper for better path resolution
         path = request.path
-        # Check if path might be relative to test directory
-        if not os.path.isabs(path) and not path.startswith("data/") and not path.startswith("./data/"):
+        # Remove the restriction for data/ paths - always check if the path is relative to test directory
+        if not os.path.isabs(path):
             if hasattr(test_helper, "test_files_dir") and test_helper.test_files_dir:
                 test_path = test_helper.test_files_dir / path
                 if test_path.exists():
@@ -341,8 +341,9 @@ def create_folders(request: CreateFoldersRequest, ctx: Context) -> OperationResp
         paths = []
         for path in request.paths:
             # If using custom test directory, resolve relative paths
+            # Remove the restriction for data/ paths
             if hasattr(test_helper, "test_files_dir") and test_helper.test_files_dir and \
-               not os.path.isabs(path) and not path.startswith("data/") and not path.startswith("./data/"):
+               not os.path.isabs(path):
                 path = str(test_helper.test_files_dir / path)
             paths.append(path)
         
@@ -372,8 +373,9 @@ def search_files(request: SearchFilesRequest, ctx: Context) -> SearchFilesRespon
     try:
         # Resolve path for test_helper
         path = request.path
+        # Remove the restriction for data/ paths
         if hasattr(test_helper, "test_files_dir") and test_helper.test_files_dir and \
-           not os.path.isabs(path) and not path.startswith("data/") and not path.startswith("./data/"):
+           not os.path.isabs(path):
             path = str(test_helper.test_files_dir / path)
         
         logger.info(f"Searching for pattern '{request.pattern}' in {path}")

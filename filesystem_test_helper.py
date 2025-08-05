@@ -129,7 +129,8 @@ class FileSystemTestHelper:
         try:
             # If directory is a relative path within the test files directory structure,
             # resolve it against the test_files_dir
-            if not os.path.isabs(directory) and not directory.startswith("data/") and not directory.startswith("./data/"):
+            # MODIFIED: Handle data/ paths by removing the prefix check
+            if not os.path.isabs(directory):
                 # Check if it might be a path relative to test_files_dir
                 test_relative_path = self.test_files_dir / directory
                 if test_relative_path.exists():
@@ -158,7 +159,8 @@ class FileSystemTestHelper:
         """
         try:
             # Check if file_path is relative to test_files_dir
-            if not os.path.isabs(file_path) and not file_path.startswith("data/") and not file_path.startswith("./data/"):
+            # MODIFIED: Handle data/ paths by removing the prefix check
+            if not os.path.isabs(file_path):
                 test_relative_path = self.test_files_dir / file_path
                 if test_relative_path.exists():
                     file_path = str(test_relative_path)
@@ -179,7 +181,8 @@ class FileSystemTestHelper:
         """
         try:
             # Resolve path against test_files_dir if it's a relative path
-            if not os.path.isabs(file_path) and not file_path.startswith("data/") and not file_path.startswith("./data/"):
+            # MODIFIED: Handle data/ paths by removing the prefix check
+            if not os.path.isabs(file_path):
                 file_path = str(self.test_files_dir / file_path)
                 
             return self.filesystem_client.write_file(file_path, content)
@@ -198,7 +201,8 @@ class FileSystemTestHelper:
         """
         try:
             # Resolve path against test_files_dir if it's a relative path
-            if not os.path.isabs(file_path) and not file_path.startswith("data/") and not file_path.startswith("./data/"):
+            # MODIFIED: Handle data/ paths by removing the prefix check
+            if not os.path.isabs(file_path):
                 file_path = str(self.test_files_dir / file_path)
                 
             return self.filesystem_client.append_to_file(file_path, content, create_if_missing=True)
@@ -216,7 +220,8 @@ class FileSystemTestHelper:
         """
         try:
             # Resolve path against test_files_dir if it's a relative path
-            if not os.path.isabs(directory) and not directory.startswith("data/") and not directory.startswith("./data/"):
+            # MODIFIED: Handle data/ paths by removing the prefix check
+            if not os.path.isabs(directory):
                 directory = str(self.test_files_dir / directory)
                 
             return self.filesystem_client.create_folders([directory])
@@ -235,10 +240,11 @@ class FileSystemTestHelper:
         """
         try:
             # Resolve paths against test_files_dir if they are relative paths
-            if not os.path.isabs(source) and not source.startswith("data/") and not source.startswith("./data/"):
+            # MODIFIED: Handle data/ paths by removing the prefix check            
+            if not os.path.isabs(source):
                 source = str(self.test_files_dir / source)
             
-            if not os.path.isabs(destination) and not destination.startswith("data/") and not destination.startswith("./data/"):
+            if not os.path.isabs(destination):
                 destination = str(self.test_files_dir / destination)
                 
             return self.filesystem_client.copy_entry(source, destination)
@@ -257,10 +263,11 @@ class FileSystemTestHelper:
         """
         try:
             # Resolve paths against test_files_dir if they are relative paths
-            if not os.path.isabs(source) and not source.startswith("data/") and not source.startswith("./data/"):
+            # MODIFIED: Handle data/ paths by removing the prefix check
+            if not os.path.isabs(source):
                 source = str(self.test_files_dir / source)
             
-            if not os.path.isabs(destination) and not destination.startswith("data/") and not destination.startswith("./data/"):
+            if not os.path.isabs(destination):
                 destination = str(self.test_files_dir / destination)
             
             # The move_entry method expects a destination directory, not file
@@ -285,7 +292,8 @@ class FileSystemTestHelper:
         """
         try:
             # Resolve path against test_files_dir if it's a relative path
-            if not os.path.isabs(directory) and not directory.startswith("data/") and not directory.startswith("./data/"):
+            # MODIFIED: Handle data/ paths by removing the prefix check
+            if not os.path.isabs(directory):
                 directory = str(self.test_files_dir / directory)
                 
             results = self.filesystem_client.search_files(pattern, directory)
