@@ -83,12 +83,14 @@ class ProviderConfig:
         # Check if we have a cached result
         cache_key = f"api_{model_id}"
         if cache_key in cls._cached_providers:
+            print(f"Cached: {cache_key}")
             return cls._cached_providers[cache_key]
         
         try:
             # Fetch providers using the API client
             client = cls.get_client()
             providers = await client.get_providers_for_model(model_id, tools_support_only=True)
+            print(providers)
             
             # Cache the results
             cls._cached_providers[cache_key] = providers
@@ -136,6 +138,9 @@ class ProviderConfig:
         try:
             # First try to get providers from API
             api_providers = await cls.fetch_providers_for_model(model_id)
+            print(model_id)
+            print(api_providers)
+            print(enabled_only)
             if api_providers:
                 if enabled_only:
                     # Filter out any providers explicitly disabled in static config

@@ -24,7 +24,7 @@ class EndpointInfo(BaseModel):
     max_prompt_tokens: Optional[int] = Field(None, description="Maximum prompt tokens")
     supported_parameters: List[str] = Field(..., description="Parameters supported by this endpoint")
     status: int = Field(..., description="Provider status")
-    uptime_last_30m: float = Field(..., description="Uptime percentage in last 30 minutes")
+    uptime_last_30m: Optional[float] = Field(None, description="Uptime percentage in last 30 minutes")
 
 class ModelInfo(BaseModel):
     """Information about a model."""

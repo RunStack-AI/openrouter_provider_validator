@@ -61,6 +61,8 @@ except ImportError:
     LOGFIRE_AVAILABLE = False
     logger.warning("logfire not installed, skipping instrumentation")
 
+from tracelight import log_exception_state
+
 class TestResults(TypedDict, total=False):
     """Results of a test run."""
     model: str
@@ -301,11 +303,13 @@ class ProviderTester:
             
         except Exception as e:
             logger.error(f"Error running agent: {str(e)}")
+            trace = log_exception_state(e, logger)
             return {
                 "error": str(e),
                 "messages": [],
                 "latency_ms": 0,
-                "validation_errors": []
+                "validation_errors": [],
+                "debug": trace
             }
     
     async def run_test(self, prompt_id: str = "file_operations_sequence") -> TestResult:
@@ -407,7 +411,8 @@ class ProviderTester:
             except Exception as e:
                 # If serialization fails, include a placeholder with error info
                 logger.warning(f"Error serializing message: {e}")
-                serialized_messages.append({"error": f"Failed to serialize message: {str(e)}"})
+                trace_data = log_exception_state(e, logger)
+                serialized_messages.append({"error": f"Failed to serialize message: {str(e)}", "debug": trace_data})
         
         # Create metrics dictionary including extra fields that don't fit in TestResult
         metrics = {

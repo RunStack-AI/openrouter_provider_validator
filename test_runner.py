@@ -34,6 +34,8 @@ logging.basicConfig(
 
 logger = logging.getLogger("test_runner")
 
+from tracelight import log_exception_state
+
 async def load_prompts(prompts_path="data/prompts.json", prompt_ids=None):
     """
     Load all prompts from the prompts JSON file.
@@ -268,6 +270,7 @@ async def run_provider_tests(model: str, provider_config: Dict, all_prompts: Lis
                 
         except Exception as e:
             logger.error(f"Error running test {prompt['id']} with provider {provider_name}: {e}")
+            log_exception_state(e, logger)
             # Create a failed result record as a TestResult object
             failed_result = TestResult(
                 model=model,
@@ -641,6 +644,7 @@ async def run_tests(
             # Run provider tests in parallel
             tasks = []
             for provider_config in model_providers:
+                logger.info(f"Provider Config: {provider_config}")
                 task = asyncio.create_task(
                     run_provider_tests(model, provider_config, all_prompts, output_dir, batch_timestamp)
                 )
@@ -656,6 +660,7 @@ async def run_tests(
         else:
             # Run provider tests sequentially
             for provider_config in model_providers:
+                logger.info(f"Provider Config: {provider_config}")
                 provider_key, provider_data = await run_provider_tests(
                     model, provider_config, all_prompts, output_dir, batch_timestamp
                 )
