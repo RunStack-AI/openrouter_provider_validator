@@ -25,3 +25,6 @@ reports/
 
 # Project-specific
 .variables.json
+
+# Test Data
+data/test_files
