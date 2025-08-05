@@ -1,1 +1,0 @@
-This file was created to test successful copy operations after handling an error.

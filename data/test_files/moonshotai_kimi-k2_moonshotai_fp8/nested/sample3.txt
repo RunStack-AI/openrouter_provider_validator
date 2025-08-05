@@ -1,3 +1,0 @@
-This is a nested file
-Located in a subdirectory
-For testing nested path operations.
